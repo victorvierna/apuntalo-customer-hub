@@ -1,0 +1,43 @@
+# AGENTS.md
+
+## Proyecto
+Dashboard interno para gestionar respuestas automatizadas a los mensajes de clientes
+que llegan a una cuenta secundaria de Instagram de Apúntalo. Cualquier mensaje que
+necesite intervención humana se deriva a Bárbara (equipo de Apúntalo).
+
+- Fase actual: Sprint 1, explorando cómo conectar Instagram, el canal principal del MVP.
+- El stack todavía no está decidido: no asumas lenguajes, frameworks ni dependencias.
+- Regla de producto: el asistente de Instagram solo responde con información de las FAQ;
+  si no la tiene, deriva a una persona (handoff). Nunca inventa respuestas.
+
+## Arquitectura
+- Núcleo independiente del canal + un adaptador por canal.
+- Solo `modules/channels/<canal>/` puede contener código específico de un canal (p. ej. Instagram).
+- Diagramas en `docs/architecture/`.
+
+## Estructura
+- `data/faqs/` — base de conocimiento (FAQ oficiales). Nunca datos reales de clientes.
+- `docker/` — instrucciones para arrancar todo en cualquier máquina.
+- `env/` — secretos locales (tokens, API keys). Git lo ignora.
+- `modules/`
+  - `channels/` — código concreto de cada canal (ahora solo `instagram/`).
+  - `gateway/` — entrada única al núcleo; decide si el asistente puede contestar o no.
+  - `handoff/` — si el asistente no puede contestar, deriva la conversación a una persona.
+  - `logging/` — registra cada mensaje, respuesta, modelo, coste y derivación para depurar y medir el MVP.
+  - `models/` — clientes de los modelos de IA; el router decide cuál usar.
+  - `platform/` — dashboard interno: bandeja de conversaciones y gestión de la derivación.
+  - `rag/` — busca en `data/faqs/` la información para responder; si no la encuentra, devuelve vacío.
+  - `router/` — escoge el mejor modelo para contestar según la entrada.
+- `shared/` — código usado por 2 o más módulos: `config/`, `types/`, `utils/`.
+
+## Comandos
+TODO: pendiente de decidir el stack. No inventes comandos de instalación, ejecución ni tests.
+
+## Git y Pull Requests
+<!-- TODO (Dani): ramas, formato de commits y cómo entra el código en main -->
+
+## Seguridad
+- Los secretos van en `env/` (o `.env`), jamás en el código como texto plano.
+
+## Cómo trabajar
+<!-- TODO (Dani): cuándo preguntar antes de actuar y dónde documentar decisiones -->
