@@ -34,10 +34,22 @@ necesite intervención humana se deriva a Bárbara (equipo de Apúntalo).
 TODO: pendiente de decidir el stack. No inventes comandos de instalación, ejecución ni tests.
 
 ## Git y Pull Requests
-<!-- TODO (Dani): ramas, formato de commits y cómo entra el código en main -->
+- Nunca se hace commit directo a `main`; todo entra por Pull Request.
+- Ramas desde `main` con prefijo: `feature/`, `fix/`, `docs/`, `ci/` (p. ej. `docs/agents-md`).
+- Commits en inglés con Conventional Commits: `tipo(ámbito opcional): descripción`
+  (tipos: feat, fix, docs, chore, ci, refactor, test). Ej: `docs(architecture): add c2 diagram`.
+- Commits pequeños y con un solo propósito.
+- Cada PR necesita la revisión del otro miembro del equipo antes de mergear.
+
+## Cómo trabajar
+- Pregunta antes de: añadir dependencias, elegir stack/frameworks, cambiar la estructura
+  de carpetas, tocar `env/` o secretos, o hacer cualquier acción en `main` o en remoto.
+- Si una petición es ambigua, pregunta en vez de suponer.
+- Las decisiones de arquitectura se documentan en `docs/architecture/`;
+  las tareas y el seguimiento del sprint, en Notion.
+- Si cambias la estructura o las convenciones, actualiza este AGENTS.md en el mismo PR.
 
 ## Seguridad
 - Los secretos van en `env/` (o `.env`), jamás en el código como texto plano.
 
-## Cómo trabajar
-<!-- TODO (Dani): cuándo preguntar antes de actuar y dónde documentar decisiones -->
+
