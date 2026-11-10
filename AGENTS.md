@@ -5,7 +5,6 @@ Dashboard interno para gestionar respuestas automatizadas a los mensajes de clie
 que llegan a una cuenta secundaria de Instagram de Apúntalo. Cualquier mensaje que
 necesite intervención humana se deriva a Bárbara (equipo de Apúntalo).
 
-- Fase actual: Sprint 1, explorando cómo conectar Instagram, el canal principal del MVP.
 - El stack todavía no está decidido: no asumas lenguajes, frameworks ni dependencias.
 - Regla de producto: el asistente de Instagram solo responde con información de las FAQ;
   si no la tiene, deriva a una persona (handoff). Nunca inventa respuestas.
@@ -40,6 +39,10 @@ TODO: pendiente de decidir el stack. No inventes comandos de instalación, ejecu
   (tipos: feat, fix, docs, chore, ci, refactor, test). Ej: `docs(architecture): add c2 diagram`.
 - Commits pequeños y con un solo propósito.
 - Cada PR necesita la revisión del otro miembro del equipo antes de mergear.
+- Toda PR usa la plantilla `.github/pull_request_template.md`, completa y escrita
+  para que el revisor la entienda sin leer el código.
+- Si el cambio se ve (interfaz, flujos), añade capturas o un vídeo corto.
+  Si eres un agente de IA, indica dónde debe añadirlas una persona.
 
 ## Cómo trabajar
 - Pregunta antes de: añadir dependencias, elegir stack/frameworks, cambiar la estructura
@@ -51,5 +54,3 @@ TODO: pendiente de decidir el stack. No inventes comandos de instalación, ejecu
 
 ## Seguridad
 - Los secretos van en `env/` (o `.env`), jamás en el código como texto plano.
-
-
