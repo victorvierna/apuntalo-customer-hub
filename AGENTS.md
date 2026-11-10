@@ -5,6 +5,7 @@ Dashboard interno para gestionar respuestas automatizadas a los mensajes de clie
 que llegan a una cuenta secundaria de Instagram de Apúntalo. Cualquier mensaje que
 necesite intervención humana se deriva a Bárbara (equipo de Apúntalo).
 
+- El stack todavía no está decidido: no asumas lenguajes, frameworks ni dependencias.
 - Regla de producto: el asistente de Instagram solo responde con información de las FAQ;
   si no la tiene, deriva a una persona (handoff). Nunca inventa respuestas.
 
@@ -41,6 +42,7 @@ TODO: pendiente de decidir el stack. No inventes comandos de instalación, ejecu
 - Toda PR usa la plantilla `.github/pull_request_template.md`, completa y escrita
   para que el revisor la entienda sin leer el código.
 - Si el cambio se ve (interfaz, flujos), añade capturas o un vídeo corto.
+  Si eres un agente de IA, indica dónde debe añadirlas una persona.
 
 ## Cómo trabajar
 - Pregunta antes de: añadir dependencias, elegir stack/frameworks, cambiar la estructura
@@ -49,8 +51,6 @@ TODO: pendiente de decidir el stack. No inventes comandos de instalación, ejecu
 - Las decisiones de arquitectura se documentan en `docs/architecture/`;
   las tareas y el seguimiento del sprint, en Notion.
 - Si cambias la estructura o las convenciones, actualiza este AGENTS.md en el mismo PR.
-
-
 
 ## Seguridad
 - Los secretos van en `env/` (o `.env`), jamás en el código como texto plano.
