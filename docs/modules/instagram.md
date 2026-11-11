@@ -21,6 +21,7 @@ deriva conversaciones**. Eso es trabajo de otros módulos.
 | `cli.py` | `InstagramCli`: ejecuta instagram-cli (sin shell) y devuelve el `data` de su JSON. |
 | `mapper.py` | Traduce el JSON a los tipos comunes. Funciones puras, sin red. |
 | `errors.py` | Errores del adaptador (todos heredan de `InstagramCliError`). |
+| `patches/` | Parche propio para instagram-cli que evita que se pierdan mensajes (ver "Mensajes perdidos"). |
 | `tests/` | Tests con `unittest` y respuestas de ejemplo (`fixtures/`, datos inventados). |
 
 ## Uso
@@ -84,6 +85,8 @@ El asistente solo responde a `text`. Todo lo demás se deriva a una persona
   con otra persona. El adaptador lanza `ValueError` antes de ejecutar nada.
 - `inbox` devuelve como mucho **10 conversaciones**, aunque se pida más.
 - **`sent: true` no garantiza que el mensaje llegue.** Ver "Mensajes perdidos" más abajo.
+- `read` devuelve como mucho **unos 10 mensajes** por llamada, aunque se pidan más (el resto
+  se lee por páginas con `--cursor`).
 - Leer no marca la conversación como vista.
 
 ## Errores
@@ -97,18 +100,33 @@ El asistente solo responde a `text`. Todo lo demás se deriva a una persona
 | `InstagramFormatError` | El JSON no tiene el formato esperado | Probablemente instagram-cli se actualizó: revisar `mapper.py` |
 | `InstagramCliError` | Cualquier otro error de instagram-cli | Mirar el mensaje |
 
-## Mensajes perdidos (bug conocido de instagram-cli)
+## Mensajes perdidos (bug de instagram-cli, corregido con un parche propio)
 
-En las pruebas, Instagram descartó en silencio **8 de 18 mensajes** enviados en ráfaga,
-aunque instagram-cli respondió `sent: true`. Es aleatorio y no depende del contenido. Es un
-bug abierto de instagram-cli ([#349](https://github.com/supreme-gg-gg/instagram-cli/issues/349),
-[#171](https://github.com/supreme-gg-gg/instagram-cli/issues/171)), con una corrección
-propuesta y sin mergear ([PR #350](https://github.com/supreme-gg-gg/instagram-cli/pull/350)).
+Sin parche, Instagram descartó en silencio **13 de 28 mensajes**, aunque instagram-cli
+respondió `sent: true`. No depende del contenido ni de lo rápido que se envíe. Instagram
+llega a mostrar el mensaje en directo (incluso puede llegar la notificación), pero no lo
+guarda: al recargar el chat desaparece. Es un bug abierto de instagram-cli
+([#349](https://github.com/supreme-gg-gg/instagram-cli/issues/349),
+[#171](https://github.com/supreme-gg-gg/instagram-cli/issues/171); corrección propuesta y sin
+mergear en la [PR #350](https://github.com/supreme-gg-gg/instagram-cli/pull/350)).
 
-Por eso `send_text` comprueba por defecto que el mensaje aparece en la conversación
-(acertó el 100 % en real). Con `verify=False` no espera, y se puede comprobar más tarde con
-`is_delivered`. Si se reintenta o no, y cuántas veces, está pendiente de decidir (ver la
-tarea de Notion).
+La causa está en cómo envía la librería que usa instagram-cli (`instagram-private-api`
+1.46.1). El parche `patches/instagram-private-api-send-fix.patch` cambia dos cosas en
+`dist/repositories/direct-thread.repository.js`:
+
+1. El identificador de cada envío (`client_context`, `mutation_token`,
+   `offline_threading_id`) pasa a ser numérico y basado en la hora, como en la app oficial,
+   en vez de un GUID al azar.
+2. Si falta la cookie `csrftoken`, no se envía el campo, en vez de enviar la palabra
+   `"missing"`.
+
+**Con el parche se entregaron 25 de 25** (10 con pausa y 15 seguidos), comprobado desde las
+dos cuentas. No sabemos cuál de los dos cambios es el que lo arregla, así que se mantienen
+los dos.
+
+Aun así, `send_text` sigue comprobando por defecto que el mensaje aparece en la conversación,
+como red de seguridad (acertó en todos los casos probados). Con `verify=False` no espera, y se
+puede comprobar más tarde con `is_delivered`.
 
 ## Instalación de instagram-cli
 
@@ -116,14 +134,32 @@ Requiere **Node.js 22 o superior**. Probado con la versión **2.1.0**.
 
 ```bash
 npm install -g --prefix ~/.local @i7m/instagram-cli@2.1.0   # sin sudo; ~/.local/bin debe estar en el PATH
-cd ~/.local/lib/node_modules/@i7m/instagram-cli && npx patch-package   # ver nota
+(cd ~/.local/lib/node_modules/@i7m/instagram-cli && npx patch-package)   # parches de instagram-cli (nota 1)
+patch -p1 -N \
+  -d ~/.local/lib/node_modules/@i7m/instagram-cli/node_modules/instagram-private-api \
+  < modules/channels/instagram/patches/instagram-private-api-send-fix.patch   # nuestro parche (nota 2)
 instagram-cli --version
 ```
 
-**Nota:** las versiones recientes de npm bloquean el script de instalación del paquete, que
+**Nota 1:** las versiones recientes de npm bloquean el script de instalación del paquete, que
 aplica dos parches. Uno actualiza la versión de la app de Instagram con la que se identifica
 (sin él usa una de 2019 y el inicio de sesión puede fallar o parecer sospechoso). Por eso hay
 que ejecutar `npx patch-package` a mano.
+
+**Nota 2:** nuestro parche evita que se pierdan mensajes (ver "Mensajes perdidos"). El último
+`patch` se ejecuta desde la raíz del repo y después de `npx patch-package`. Si ya estaba
+aplicado, avisa ("Reversed (or previously applied) patch detected") y no cambia nada. Para
+comprobar si está aplicado:
+
+```bash
+patch -p1 -R --dry-run -s \
+  -d ~/.local/lib/node_modules/@i7m/instagram-cli/node_modules/instagram-private-api \
+  < modules/channels/instagram/patches/instagram-private-api-send-fix.patch && echo aplicado
+```
+
+Reinstalar o actualizar instagram-cli borra el parche: hay que volver a aplicarlo. Si al
+actualizar el parche no se aplica, comprobar si instagram-cli ya corrigió el bug (#349) y, si
+no, rehacerlo para la nueva versión de `instagram-private-api`.
 
 ### Iniciar sesión (una vez, a mano)
 
