@@ -7,6 +7,13 @@ __pycache__/
 !/env/.gitkeep
 .tmp/
 
+# Base de datos local (contiene datos reales de clientes)
+/storage/*
+!/storage/.gitkeep
+*.db
+*.db-wal
+*.db-shm
+
 # IDE / OS
 .vscode/
 .idea/
