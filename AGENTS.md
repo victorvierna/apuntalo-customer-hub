@@ -52,5 +52,12 @@ TODO: pendiente de decidir el stack. No inventes comandos de instalación, ejecu
   las tareas y el seguimiento del sprint, en Notion.
 - Si cambias la estructura o las convenciones, actualiza este AGENTS.md en el mismo PR.
 
+## Notion (gestión del proyecto)
+- Tareas y sprints: base de datos "Tareas" del workspace de Apúntalo Marketing Platform.
+- Antes de empezar una tarea, búscala en Notion y lee su descripción y criterios de aceptación.
+  Si el código y Notion se contradicen, pregunta.
+- No cambies estados, responsables ni fechas en Notion sin que te lo pidan.
+- Si no tienes acceso a Notion, dilo y pide a la persona que te pegue la tarea.
+
 ## Seguridad
 - Los secretos van en `env/` (o `.env`), jamás en el código como texto plano.
