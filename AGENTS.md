@@ -19,7 +19,8 @@ necesite intervención humana se deriva a Bárbara (equipo de Apúntalo).
 - `docker/` — instrucciones para arrancar todo en cualquier máquina.
 - `env/` — secretos locales (tokens, API keys). Git lo ignora.
 - `modules/`
-  - `channels/` — código concreto de cada canal (ahora solo `instagram/`).
+  - `channels/` — código concreto de cada canal (ahora solo `instagram/`, documentado en
+    `docs/modules/instagram.md`). Cada canal traduce sus datos a los tipos de `shared/types/`.
   - `gateway/` — entrada única al núcleo; decide si el asistente puede contestar o no.
   - `handoff/` — si el asistente no puede contestar, deriva la conversación a una persona.
   - `logging/` — registra cada mensaje, respuesta, modelo, coste y derivación para depurar y medir el MVP.
