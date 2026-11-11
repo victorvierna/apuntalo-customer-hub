@@ -4,14 +4,23 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from modules.channels.instagram import InstagramAdapter, InstagramCli, InstagramCliError
+from modules.channels.instagram import (
+    InstagramAdapter,
+    InstagramCli,
+    InstagramCliError,
+    InstagramDeliveryError,
+)
 from shared.types.messages import ContentType, Direction
 
 from .helpers import THREAD_ID, FakeRunner
 
+SENT_ID = "30000000000000000000000000000000009"
 
-def adapter_with(runner: FakeRunner) -> InstagramAdapter:
-    return InstagramAdapter(InstagramCli(runner=runner))
+
+def adapter_with(runner: FakeRunner, sleeps: list | None = None) -> InstagramAdapter:
+    """Adapter on a fake instagram-cli. Never really sleeps; records the waits."""
+    sleeps = [] if sleeps is None else sleeps
+    return InstagramAdapter(InstagramCli(runner=runner), sleep=sleeps.append)
 
 
 class ListConversationsTest(unittest.TestCase):
@@ -61,8 +70,11 @@ class ReadMessagesTest(unittest.TestCase):
 class SendTextTest(unittest.TestCase):
     def test_sends_and_returns_message_id(self):
         runner = FakeRunner.from_fixture("send_ok.json")
-        message_id = adapter_with(runner).send_text(THREAD_ID, "Hola, ¿en qué te ayudo?")
-        self.assertEqual(message_id, "30000000000000000000000000000000009")
+        message_id = adapter_with(runner).send_text(
+            THREAD_ID, "Hola, ¿en qué te ayudo?", verify=False
+        )
+        self.assertEqual(message_id, SENT_ID)
+        self.assertEqual(len(runner.calls), 1, "verify=False must not read the conversation")
         self.assertEqual(
             runner.last_command[1:4],
             ["send", THREAD_ID, "--text=Hola, ¿en qué te ayudo?"],
@@ -70,7 +82,7 @@ class SendTextTest(unittest.TestCase):
 
     def test_text_starting_with_dash_stays_a_value(self):
         runner = FakeRunner.from_fixture("send_ok.json")
-        adapter_with(runner).send_text(THREAD_ID, "-hola --mark-seen")
+        adapter_with(runner).send_text(THREAD_ID, "-hola --mark-seen", verify=False)
         self.assertIn("--text=-hola --mark-seen", runner.last_command)
 
     def test_refuses_empty_text(self):
@@ -83,6 +95,45 @@ class SendTextTest(unittest.TestCase):
         runner = FakeRunner(stdout='{"ok": true, "data": {"sent": false}}')
         with self.assertRaises(InstagramCliError):
             adapter_with(runner).send_text(THREAD_ID, "hola")
+
+
+class DeliveryCheckTest(unittest.TestCase):
+    """instagram-cli says "sent" even when Instagram silently drops the message."""
+
+    def test_verifies_by_default_and_passes_when_message_appears(self):
+        runner = FakeRunner.sequence("send_ok.json", "read_after_send.json")
+        sleeps = []
+        message_id = adapter_with(runner, sleeps).send_text(THREAD_ID, "Hola, ¿en qué te ayudo?")
+        self.assertEqual(message_id, SENT_ID)
+        self.assertEqual([c[1] for c in runner.calls], ["send", "read"])
+        self.assertNotIn("--mark-seen", runner.last_command)
+        self.assertEqual(len(sleeps), 1)
+
+    def test_lost_message_raises_delivery_error_after_retrying(self):
+        # The conversation never shows the sent message.
+        runner = FakeRunner.sequence("send_ok.json", "read_all_types.json")
+        sleeps = []
+        with self.assertRaises(InstagramDeliveryError) as caught:
+            adapter_with(runner, sleeps).send_text(THREAD_ID, "hola")
+        self.assertEqual(caught.exception.message_id, SENT_ID)
+        self.assertEqual([c[1] for c in runner.calls], ["send", "read", "read"])
+        self.assertEqual(len(sleeps), 2)
+
+    def test_failing_check_is_a_delivery_error_with_the_id(self):
+        # Sent fine, but reading the conversation afterwards fails: the state is
+        # unknown, so it must not look like a plain send failure (no resend).
+        runner = FakeRunner.sequence("send_ok.json", "error_no_session.json")
+        with self.assertRaises(InstagramDeliveryError) as caught:
+            adapter_with(runner).send_text(THREAD_ID, "hola")
+        self.assertEqual(caught.exception.message_id, SENT_ID)
+
+    def test_delivery_error_is_an_instagram_cli_error(self):
+        self.assertTrue(issubclass(InstagramDeliveryError, InstagramCliError))
+
+    def test_is_delivered(self):
+        adapter = adapter_with(FakeRunner.from_fixture("read_after_send.json"))
+        self.assertTrue(adapter.is_delivered(THREAD_ID, SENT_ID))
+        self.assertFalse(adapter.is_delivered(THREAD_ID, "30000000000000000000000000000000077"))
 
 
 class ConversationIdSafetyTest(unittest.TestCase):

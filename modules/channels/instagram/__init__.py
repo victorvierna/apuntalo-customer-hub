@@ -18,6 +18,7 @@ from .errors import (
     InstagramCliError,
     InstagramCliNotFoundError,
     InstagramCliTimeoutError,
+    InstagramDeliveryError,
     InstagramFormatError,
 )
 
@@ -28,5 +29,6 @@ __all__ = [
     "InstagramCliError",
     "InstagramCliNotFoundError",
     "InstagramCliTimeoutError",
+    "InstagramDeliveryError",
     "InstagramFormatError",
 ]

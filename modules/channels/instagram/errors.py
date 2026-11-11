@@ -26,6 +26,20 @@ class InstagramAuthError(InstagramCliError):
     """
 
 
+class InstagramDeliveryError(InstagramCliError):
+    """instagram-cli said the message was sent, but it never appeared in the
+    conversation.
+
+    Seen in real tests: Instagram silently drops some messages sent through
+    instagram-cli (5 out of 13, at random). The caller should mark the message
+    as ``delivery_status = 'failed'`` and let a person know.
+    """
+
+    def __init__(self, message: str, message_id: str) -> None:
+        super().__init__(message)
+        self.message_id = message_id
+
+
 class InstagramFormatError(InstagramCliError):
     """instagram-cli answered, but not in the format we expect.
 

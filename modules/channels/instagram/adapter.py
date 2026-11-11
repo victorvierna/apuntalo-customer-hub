@@ -7,15 +7,21 @@ To detect new messages, do not rely on ``unread`` or ``last_activity_at``: a
 message request accepted in the app appears as already read and with its old
 date. Read the most recent conversations and let the database discard the
 messages it already has (``UNIQUE (conversation_id, external_id)``).
+
+Do not trust instagram-cli's "sent" either: Instagram silently drops some
+messages (5 out of 13 in our tests). ``send_text`` checks that the message
+really appears in the conversation unless told otherwise.
 """
 
 import re
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 from shared.types.messages import ChannelConversation, ChannelMessage
 
 from .cli import InstagramCli
-from .errors import InstagramCliError, InstagramFormatError
+from .errors import InstagramCliError, InstagramDeliveryError, InstagramFormatError
 from .mapper import CHANNEL, to_conversation, to_message
 
 # instagram-cli treats an argument of 20+ digits as a conversation id. Anything
@@ -23,12 +29,30 @@ from .mapper import CHANNEL, to_conversation, to_message
 # with a different person. We only ever pass exact ids.
 _CONVERSATION_ID = re.compile(r"\d{20,}")
 
+# Delivery check after sending: wait, read the conversation, repeat. In tests a
+# delivered message was always visible after 2-4 s.
+VERIFY_ATTEMPTS = 2
+VERIFY_DELAY_SECONDS = 2.0
+VERIFY_READ_LIMIT = 10
+
 
 class InstagramAdapter:
     channel = CHANNEL
 
-    def __init__(self, cli: InstagramCli | None = None) -> None:
+    def __init__(
+        self,
+        cli: InstagramCli | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        """
+        Args:
+            cli: How to run instagram-cli. Defaults to ``instagram-cli`` in PATH
+                with the account that logged in last.
+            sleep: Waiting function used by the delivery check. Only tests
+                change it.
+        """
         self._cli = cli or InstagramCli()
+        self._sleep = sleep
 
     def list_conversations(self, limit: int = 20) -> list[ChannelConversation]:
         """Most recent conversations of the main inbox.
@@ -55,8 +79,19 @@ class InstagramAdapter:
             raise InstagramFormatError("read: 'data.messages' must be a list.")
         return [to_message(item, conversation_id) for item in data["messages"]]
 
-    def send_text(self, conversation_id: str, text: str) -> str:
-        """Sends a text message and returns its message id."""
+    def send_text(self, conversation_id: str, text: str, verify: bool = True) -> str:
+        """Sends a text message and returns its message id.
+
+        With ``verify=True`` (default) it then reads the conversation to check
+        the message is really there, which adds ~6-12 s. With ``verify=False``
+        it returns right away; check later with ``is_delivered``.
+
+        Raises:
+            InstagramDeliveryError: the message was not found after sending, or
+                the check itself failed. Mark it as failed and let a person
+                look; do not resend automatically or the contact may get it
+                twice.
+        """
         _check_conversation_id(conversation_id)
         if not text.strip():
             raise ValueError("Refusing to send an empty message.")
@@ -66,7 +101,30 @@ class InstagramAdapter:
         message_id = data.get("messageId")
         if data.get("sent") is not True or not isinstance(message_id, str) or not message_id:
             raise InstagramCliError("send: instagram-cli did not confirm the message was sent.")
+        if verify:
+            self._confirm_delivery(conversation_id, message_id)
         return message_id
+
+    def is_delivered(self, conversation_id: str, message_id: str) -> bool:
+        """Whether a sent message appears among the latest of the conversation."""
+        messages = self.read_messages(conversation_id, limit=VERIFY_READ_LIMIT)
+        return any(message.external_id == message_id for message in messages)
+
+    def _confirm_delivery(self, conversation_id: str, message_id: str) -> None:
+        for _ in range(VERIFY_ATTEMPTS):
+            self._sleep(VERIFY_DELAY_SECONDS)
+            try:
+                if self.is_delivered(conversation_id, message_id):
+                    return
+            except InstagramCliError as exc:
+                raise InstagramDeliveryError(
+                    f"Message {message_id} was sent but delivery could not be checked: {exc}",
+                    message_id,
+                ) from exc
+        raise InstagramDeliveryError(
+            f"Message {message_id} was reported as sent but does not appear in the conversation.",
+            message_id,
+        )
 
     def download_media(self, conversation_id: str, message_id: str, destination: Path) -> Path:
         """Downloads the photo or video of a ``MEDIA`` message.

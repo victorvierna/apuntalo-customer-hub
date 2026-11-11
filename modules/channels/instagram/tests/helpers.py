@@ -25,8 +25,7 @@ class FakeRunner:
     """Stands in for ``subprocess.run``: records the command, returns a canned answer."""
 
     def __init__(self, stdout: str = "", returncode: int = 0, stderr: str = "", raises=None):
-        self.stdout = stdout
-        self.returncode = returncode
+        self.answers = [(stdout, returncode)]
         self.stderr = stderr
         self.raises = raises
         self.calls: list[list[str]] = []
@@ -34,16 +33,25 @@ class FakeRunner:
 
     @classmethod
     def from_fixture(cls, name: str) -> "FakeRunner":
-        stdout = fixture_text(name)
-        ok = json.loads(stdout)["ok"]
-        return cls(stdout=stdout, returncode=0 if ok else 1)
+        return cls.sequence(name)
+
+    @classmethod
+    def sequence(cls, *names: str) -> "FakeRunner":
+        """Answers each call with the next fixture; the last one repeats."""
+        runner = cls()
+        runner.answers = []
+        for name in names:
+            stdout = fixture_text(name)
+            runner.answers.append((stdout, 0 if json.loads(stdout)["ok"] else 1))
+        return runner
 
     def __call__(self, command, **kwargs):
         self.calls.append(list(command))
         self.kwargs.append(kwargs)
         if self.raises is not None:
             raise self.raises
-        return subprocess.CompletedProcess(command, self.returncode, self.stdout, self.stderr)
+        stdout, returncode = self.answers[min(len(self.calls), len(self.answers)) - 1]
+        return subprocess.CompletedProcess(command, returncode, stdout, self.stderr)
 
     @property
     def last_command(self) -> list[str]:
