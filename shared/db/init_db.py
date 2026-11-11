@@ -59,8 +59,10 @@ CREATE TABLE conversations (
   contact_id          INTEGER NOT NULL REFERENCES contacts(id),
   status              TEXT NOT NULL DEFAULT 'bot'
                       CHECK (status IN ('bot', 'waiting_human', 'closed')),
+  external_id         TEXT NOT NULL,
   last_message_at     TEXT NOT NULL,
-  created_at          TEXT NOT NULL
+  created_at          TEXT NOT NULL,
+  UNIQUE (channel_account_id, external_id)
 ) STRICT;
 
 CREATE TABLE messages (
@@ -69,11 +71,15 @@ CREATE TABLE messages (
   direction        TEXT NOT NULL CHECK (direction IN ('in', 'out')),
   author           TEXT NOT NULL CHECK (author IN ('contact', 'assistant', 'human')),
   author_user_id   INTEGER REFERENCES users(id),
-  body             TEXT NOT NULL,
+  content_type     TEXT NOT NULL DEFAULT 'text'
+                   CHECK (content_type IN ('text', 'media', 'unsupported')),
+  body             TEXT,
+  media_path       TEXT,
   external_id      TEXT,
   delivery_status  TEXT CHECK (delivery_status IN ('sent', 'failed')),
   created_at       TEXT NOT NULL,
-  UNIQUE (conversation_id, external_id)
+  UNIQUE (conversation_id, external_id),
+  CHECK (content_type <> 'text' OR body IS NOT NULL)
 ) STRICT;
 
 CREATE TABLE processing_runs (
@@ -125,7 +131,8 @@ CREATE TABLE handoffs (
   conversation_id    INTEGER NOT NULL REFERENCES conversations(id),
   run_id             INTEGER REFERENCES processing_runs(id),
   reason             TEXT NOT NULL
-                     CHECK (reason IN ('out_of_faq', 'request', 'low_confidence', 'manual')),
+                     CHECK (reason IN ('out_of_faq', 'request', 'low_confidence',
+                                       'unsupported_content', 'manual')),
   status             TEXT NOT NULL DEFAULT 'pending'
                      CHECK (status IN ('pending', 'answered', 'closed')),
   assigned_user_id   INTEGER REFERENCES users(id),

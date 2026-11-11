@@ -50,7 +50,7 @@ y concentraremos el acceso a datos en un único sitio del código.
 | **Tres capas separadas** | (1) Conversación: lo que ve el dashboard. (2) Procesamiento: cómo decidió el sistema. (3) Intervención humana. Así la bandeja queda limpia y el logging se puede consultar por separado. |
 | **Trazabilidad de "nunca inventa"** | Cada respuesta del asistente se puede rastrear hasta las FAQ que la justificaron y el modelo que la generó. |
 | **El logging solo recibe inserciones** | Las tablas de procesamiento y los resúmenes de tickets no se actualizan ni se borran: son un histórico fiable para las métricas. |
-| **Idempotencia** | Si el canal reenvía un mismo mensaje (algo habitual con webhooks), no se procesa ni se responde dos veces. |
+| **Idempotencia** | Si el canal reenvía un mismo mensaje (con instagram-cli el adaptador consulta el canal cada cierto tiempo y vuelve a leer mensajes que ya tenemos), no se procesa ni se responde dos veces. |
 | **Tablas `STRICT`** | SQLite permite por defecto guardar cualquier tipo en cualquier columna. Con `STRICT` se rechazan los tipos incorrectos y se evitan datos corruptos silenciosos. |
 | **`CHECK` en los estados** | Los campos con un conjunto cerrado de valores (estados, tipos) se validan en la propia BD, no solo en el código. |
 
@@ -110,7 +110,7 @@ largo del tiempo, y conviene ver su historial completo.
 |---|---|---|
 | `id` | INTEGER PK | Identificador interno. |
 | `channel` | TEXT | Canal por el que nos contacta. |
-| `external_id` | TEXT | Id del usuario en el canal. Es lo que llega en el webhook y se usa para encontrar al contacto existente. |
+| `external_id` | TEXT | Id del usuario en el canal. Es lo que devuelve el adaptador del canal y se usa para encontrar al contacto existente. En Instagram es el `userId` numérico, no el nombre de usuario, porque el nombre puede cambiar. |
 | `display_name` | TEXT, opcional | Nombre que mostrar en la bandeja. Puede faltar si el canal no lo da. |
 | `is_customer` | INTEGER, opcional | El diagrama distingue "cliente o no cliente". `1` = cliente, `0` = no cliente, `NULL` = no se sabe todavía. Usar `NULL` evita afirmar algo que no sabemos. |
 | `is_blocked` | INTEGER (booleano), por defecto `0` | `1` si el contacto está bloqueado por alguna de nuestras cuentas. El dashboard lo señala para que nadie intente responderle, y el asistente no debe enviarle mensajes. A diferencia de `is_customer`, aquí siempre sabemos el valor (por defecto no está bloqueado), así que es `NOT NULL`. Solo indica *si* está bloqueado, no *por qué cuenta* (ver decisiones abiertas). |
@@ -126,8 +126,12 @@ largo del tiempo, y conviene ver su historial completo.
 | `channel_account_id` | FK → `channel_accounts` | En qué cuenta nuestra entró la conversación, y por tanto desde cuál hay que responder. |
 | `contact_id` | FK → `contacts` | Con quién hablamos. |
 | `status` | TEXT + CHECK | **Quién lleva ahora la conversación:** `bot` (responde el asistente), `waiting_human` (derivada, el bot **no** debe contestar) o `closed`. Es el campo clave para la bandeja de Bárbara y para que el gateway sepa si puede dejar responder al asistente. |
+| `external_id` | TEXT | Id de la conversación en el canal (en Instagram, el id del hilo). Lo necesita el adaptador para leer y enviar mensajes en esa conversación, y para saber si una conversación del canal ya existe en la BD. |
 | `last_message_at` | TEXT | Ordenar la bandeja por actividad reciente sin tener que calcular el último mensaje de cada conversación en cada consulta. Es un dato redundante a propósito, por rendimiento. |
 | `created_at` | TEXT | Cuándo empezó la conversación. |
+
+`UNIQUE (channel_account_id, external_id)`: una conversación del canal es una única fila,
+aunque el adaptador la lea muchas veces.
 
 ### 6.4 `messages` — cada mensaje, en ambas direcciones
 
@@ -138,13 +142,18 @@ largo del tiempo, y conviene ver su historial completo.
 | `direction` | TEXT + CHECK | `in` (nos llega) / `out` (enviamos). Permite filtrar los entrantes, que son los que disparan el procesamiento. |
 | `author` | TEXT + CHECK | `contact`, `assistant` o `human`. Distingue si una respuesta saliente la escribió el bot o una persona. Es imprescindible para medir cuánto resuelve el asistente por sí solo. |
 | `author_user_id` | FK → `users`, opcional | Qué persona del equipo respondió, si `author = 'human'`. |
-| `body` | TEXT | Contenido del mensaje. |
+| `content_type` | TEXT + CHECK | `text`, `media` (foto u otro archivo que se puede descargar) o `unsupported` (audio, publicación compartida, reel…: contenido que el canal no nos deja leer). El asistente solo responde a `text`; el resto se deriva con `reason = 'unsupported_content'`. |
+| `body` | TEXT, opcional | Texto del mensaje. Obligatorio si `content_type = 'text'` (lo garantiza un `CHECK`). En `unsupported` guarda la descripción que da el canal (p. ej. `[Unsupported Type: voice_media]`) para que Bárbara sepa qué tipo de mensaje era. Puede faltar en `media`. |
+| `media_path` | TEXT, opcional | Ruta del archivo descargado, relativa a `storage/` (p. ej. `media/<id>.jpg`). Contiene datos de clientes: nunca va a git. |
 | `external_id` | TEXT, opcional | Id del mensaje en el canal. Sirve para detectar duplicados y para referenciarlo al responder. Es opcional porque un mensaje saliente no lo tiene hasta que el canal confirma el envío. |
 | `delivery_status` | TEXT, opcional | Para salientes: `sent` / `failed`. Si el canal rechaza el envío, el dashboard puede avisar y permitir reintentar. |
-| `created_at` | TEXT | Orden cronológico del hilo. |
+| `created_at` | TEXT | Orden cronológico del hilo. En los mensajes del canal es la fecha que da el canal (`timestamp`), no la hora a la que los guardamos; así el orden es correcto aunque el adaptador los lea con retraso. |
 
-`UNIQUE (conversation_id, external_id)`: **idempotencia**. Si Instagram reenvía el mismo
-webhook, la inserción falla y el mensaje no se procesa ni se contesta dos veces.
+`UNIQUE (conversation_id, external_id)`: **idempotencia**. El adaptador de Instagram lee las
+conversaciones recientes cada cierto tiempo y recibe otra vez mensajes que ya guardó; la
+inserción falla y el mensaje no se procesa ni se contesta dos veces. Por eso el adaptador no
+necesita fiarse de los campos "no leído" o "última actividad" del canal, que no son fiables
+(por ejemplo, una solicitud de mensaje aceptada en la app llega como leída).
 
 ### 6.5 `processing_runs` — decisión del Gateway y del Enrutador
 
@@ -224,7 +233,7 @@ Representa la parte verde del diagrama: consulta a Bárbara → respuesta → ¿
 | `id` | INTEGER PK | Identificador interno. |
 | `conversation_id` | FK → `conversations` | Conversación derivada. |
 | `run_id` | FK → `processing_runs`, opcional | Procesamiento que provocó la derivación, para entender por qué el bot no pudo responder. Es opcional porque una persona puede tomar la conversación manualmente desde el dashboard. |
-| `reason` | TEXT | Motivo: `out_of_faq`, `request`, `low_confidence` o `manual`. Saber por qué se deriva indica qué FAQ faltan o qué hay que mejorar. |
+| `reason` | TEXT | Motivo: `out_of_faq`, `request`, `low_confidence`, `unsupported_content` (audio, foto, publicación… que el asistente no puede leer) o `manual`. Saber por qué se deriva indica qué FAQ faltan o qué hay que mejorar. |
 | `status` | TEXT + CHECK | `pending` → `answered` → `closed`. Es la bandeja de trabajo de Bárbara. |
 | `assigned_user_id` | FK → `users`, opcional | Quién la atiende. Hoy es Bárbara, pero así no queda fijado en el esquema. |
 | `answer_message_id` | FK → `messages`, opcional | Mensaje con el que se respondió al cliente. Une la derivación con su resolución. |
@@ -313,8 +322,10 @@ CREATE TABLE conversations (
   contact_id          INTEGER NOT NULL REFERENCES contacts(id),
   status              TEXT NOT NULL DEFAULT 'bot'
                       CHECK (status IN ('bot', 'waiting_human', 'closed')),
+  external_id         TEXT NOT NULL,
   last_message_at     TEXT NOT NULL,
-  created_at          TEXT NOT NULL
+  created_at          TEXT NOT NULL,
+  UNIQUE (channel_account_id, external_id)
 ) STRICT;
 
 CREATE TABLE messages (
@@ -323,11 +334,15 @@ CREATE TABLE messages (
   direction        TEXT NOT NULL CHECK (direction IN ('in', 'out')),
   author           TEXT NOT NULL CHECK (author IN ('contact', 'assistant', 'human')),
   author_user_id   INTEGER REFERENCES users(id),
-  body             TEXT NOT NULL,
+  content_type     TEXT NOT NULL DEFAULT 'text'
+                   CHECK (content_type IN ('text', 'media', 'unsupported')),
+  body             TEXT,
+  media_path       TEXT,
   external_id      TEXT,
   delivery_status  TEXT CHECK (delivery_status IN ('sent', 'failed')),
   created_at       TEXT NOT NULL,
-  UNIQUE (conversation_id, external_id)
+  UNIQUE (conversation_id, external_id),
+  CHECK (content_type <> 'text' OR body IS NOT NULL)
 ) STRICT;
 
 CREATE TABLE processing_runs (
@@ -379,7 +394,8 @@ CREATE TABLE handoffs (
   conversation_id    INTEGER NOT NULL REFERENCES conversations(id),
   run_id             INTEGER REFERENCES processing_runs(id),
   reason             TEXT NOT NULL
-                     CHECK (reason IN ('out_of_faq', 'request', 'low_confidence', 'manual')),
+                     CHECK (reason IN ('out_of_faq', 'request', 'low_confidence',
+                                       'unsupported_content', 'manual')),
   status             TEXT NOT NULL DEFAULT 'pending'
                      CHECK (status IN ('pending', 'answered', 'closed')),
   assigned_user_id   INTEGER REFERENCES users(id),
