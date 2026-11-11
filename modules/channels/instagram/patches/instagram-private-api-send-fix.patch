@@ -1,0 +1,20 @@
+--- a/dist/repositories/direct-thread.repository.js
++++ b/dist/repositories/direct-thread.repository.js
+@@ -169,11 +169,15 @@
+         return body;
+     }
+     async broadcast(options) {
+-        const mutationToken = new Chance().guid();
++        // apuntalo: numeric, time-based id like the official app. A random GUID makes
++        // Instagram silently drop some messages (instagram-cli #349, #171, PR #350).
++        const mutationToken = `${Date.now()}${Math.floor(Math.random() * 1000000).toString().padStart(6, '0')}`;
+         const recipients = options.threadIds || options.userIds;
+         const recipientsType = options.threadIds ? 'thread_ids' : 'recipient_users';
+         const recipientsIds = recipients instanceof Array ? recipients : [recipients];
+-        const form = Object.assign({ action: 'send_item', [recipientsType]: JSON.stringify(recipientsType === 'thread_ids' ? recipientsIds : [recipientsIds]), client_context: mutationToken, _csrftoken: this.client.state.cookieCsrfToken, device_id: this.client.state.deviceId, mutation_token: mutationToken, _uuid: this.client.state.uuid }, options.form);
++        const form = Object.assign({ action: 'send_item', [recipientsType]: JSON.stringify(recipientsType === 'thread_ids' ? recipientsIds : [recipientsIds]), client_context: mutationToken, offline_threading_id: mutationToken, _csrftoken: this.client.state.cookieCsrfToken, device_id: this.client.state.deviceId, mutation_token: mutationToken, _uuid: this.client.state.uuid }, options.form);
++        // apuntalo: without a csrftoken cookie the library sends the literal "missing".
++        if (form._csrftoken === 'missing') delete form._csrftoken;
+         const { body } = await this.client.request.send({
+             url: `/api/v1/direct_v2/threads/broadcast/${options.item}/`,
+             method: 'POST',

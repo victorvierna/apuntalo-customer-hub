@@ -8,8 +8,9 @@ message request accepted in the app appears as already read and with its old
 date. Read the most recent conversations and let the database discard the
 messages it already has (``UNIQUE (conversation_id, external_id)``).
 
-Do not trust instagram-cli's "sent" either: Instagram silently drops some
-messages (5 out of 13 in our tests). ``send_text`` checks that the message
+Do not trust instagram-cli's "sent" either: without our patch
+(``patches/instagram-private-api-send-fix.patch``) Instagram silently dropped
+13 out of 28 messages in our tests. ``send_text`` checks that the message
 really appears in the conversation unless told otherwise.
 """
 
