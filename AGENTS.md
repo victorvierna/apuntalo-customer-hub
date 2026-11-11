@@ -5,7 +5,8 @@ Dashboard interno para gestionar respuestas automatizadas a los mensajes de clie
 que llegan a una cuenta secundaria de Instagram de Apúntalo. Cualquier mensaje que
 necesite intervención humana se deriva a Bárbara (equipo de Apúntalo).
 
-- El stack todavía no está decidido: no asumas lenguajes, frameworks ni dependencias.
+- Backend en **Python 3.11 o superior**, priorizando la librería estándar (ver `docs/decisions/0001-python.md`).
+  El resto del stack (framework web, gestor de dependencias) está pendiente: no asumas frameworks ni dependencias.
 - Regla de producto: el asistente de Instagram solo responde con información de las FAQ;
   si no la tiene, deriva a una persona (handoff). Nunca inventa respuestas.
 
@@ -13,6 +14,7 @@ necesite intervención humana se deriva a Bárbara (equipo de Apúntalo).
 - Núcleo independiente del canal + un adaptador por canal.
 - Solo `modules/channels/<canal>/` puede contener código específico de un canal (p. ej. Instagram).
 - Diagramas en `docs/architecture/`.
+- Decisiones técnicas (qué se eligió y por qué), numeradas en `docs/decisions/`.
 
 ## Estructura
 - `data/faqs/` — base de conocimiento (FAQ oficiales). Nunca datos reales de clientes.
@@ -40,7 +42,8 @@ necesite intervención humana se deriva a Bárbara (equipo de Apúntalo).
 
 ## Comandos
 - Crear la base de datos: `python shared/db/init_db.py` (solo usa la librería estándar).
-- TODO: el resto del stack está pendiente. No inventes comandos de instalación, ejecución ni tests.
+- Tests: `python -m unittest` desde la raíz del repo (usa `unittest`, de la librería estándar).
+- TODO: el resto (instalación, ejecución) está pendiente. No inventes esos comandos.
 
 ## Git y Pull Requests
 - Nunca se hace commit directo a `main`; todo entra por Pull Request.
