@@ -27,10 +27,20 @@ necesite intervención humana se deriva a Bárbara (equipo de Apúntalo).
   - `platform/` — dashboard interno: bandeja de conversaciones y gestión de la derivación.
   - `rag/` — busca en `data/faqs/` la información para responder; si no la encuentra, devuelve vacío.
   - `router/` — escoge el mejor modelo para contestar según la entrada.
-- `shared/` — código usado por 2 o más módulos: `config/`, `types/`, `utils/`.
+- `shared/` — código usado por 2 o más módulos: `config/`, `db/`, `types/`, `utils/`.
+  - `db/` — acceso a la base de datos SQLite; `init_db.py` crea el esquema.
+- `storage/` — datos locales generados en ejecución, como la base de datos
+  `apuntalo-marketing-platform.db`. Contiene datos reales de clientes: git lo ignora.
+
+## Base de datos
+- SQLite. Arquitectura y esquema en `docs/architecture/database.md`.
+- Archivo por defecto: `storage/apuntalo-marketing-platform.db`. Se puede cambiar con la
+  variable de entorno `DATABASE_PATH`; las rutas relativas son relativas a la raíz del repo.
+- Los archivos `.db` nunca se suben a git.
 
 ## Comandos
-TODO: pendiente de decidir el stack. No inventes comandos de instalación, ejecución ni tests.
+- Crear la base de datos: `python shared/db/init_db.py` (solo usa la librería estándar).
+- TODO: el resto del stack está pendiente. No inventes comandos de instalación, ejecución ni tests.
 
 ## Git y Pull Requests
 - Nunca se hace commit directo a `main`; todo entra por Pull Request.
