@@ -15,17 +15,21 @@ from enum import StrEnum
 
 
 class ContentType(StrEnum):
-    """What a message contains, from the assistant's point of view."""
+    """What a message contains.
+
+    It only says what the message is. What the system does with each type
+    (answer, hand off, only store) is decided in ``modules/handoff/policy.py``.
+    """
 
     TEXT = "text"
-    """Plain text. The only type the assistant may answer."""
+    """Plain text."""
 
     MEDIA = "media"
-    """A photo or video that can be downloaded. Handed off to a person."""
+    """A photo or video that can be downloaded."""
 
     UNSUPPORTED = "unsupported"
     """Content the channel does not let us read (voice notes, shared posts,
-    reels, links, reactions...). Handed off to a person."""
+    reels, links, reactions...)."""
 
 
 class Direction(StrEnum):
