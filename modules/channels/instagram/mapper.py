@@ -8,12 +8,18 @@ instagram-cli 2.1.0 and real messages):
 
     text          -> TEXT         body = the text ("" if empty)
     media         -> MEDIA        photo or video; body = None
+    placeholder "[Sent a ❤️]"
+                  -> REACTION     body = "❤️"
     anything else -> UNSUPPORTED  body = the description instagram-cli gives,
                                   or "[<itemType>]" if it gives none
 
 "Anything else" includes ``placeholder`` (voice notes, shared posts, reels,
-disappearing photos, reactions...), ``link`` and ``media_share``. instagram-cli
-does not include their content in the JSON, so the assistant cannot use them.
+disappearing photos...), ``link`` and ``media_share``. instagram-cli does not
+include their content in the JSON, so the assistant cannot use them.
+
+``[Sent a ❤️]`` is the heart sent as a message (Instagram's "like" item). The
+reactions to a specific message (long press) are not in the JSON of
+instagram-cli 2.1.0 ``read``, so they never reach us.
 """
 
 from datetime import UTC, datetime
@@ -29,6 +35,11 @@ from shared.types.messages import (
 from .errors import InstagramFormatError
 
 CHANNEL = "instagram"
+
+# Exact text instagram-cli gives to a heart sent as a message. Matched exactly:
+# other placeholders also start with "[Sent a" (e.g. "[Sent a link]").
+_HEART = "\u2764\ufe0f"
+_HEART_PLACEHOLDER = f"[Sent a {_HEART}]"
 
 
 def to_conversation(raw: Any) -> ChannelConversation:
@@ -62,6 +73,8 @@ def to_message(raw: Any, conversation_external_id: str) -> ChannelMessage:
         content_type, body = ContentType.TEXT, text or ""
     elif item_type == "media":
         content_type, body = ContentType.MEDIA, None
+    elif item_type == "placeholder" and text == _HEART_PLACEHOLDER:
+        content_type, body = ContentType.REACTION, _HEART
     else:
         content_type, body = ContentType.UNSUPPORTED, text or f"[{item_type}]"
 

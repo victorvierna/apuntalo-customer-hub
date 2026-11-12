@@ -31,6 +31,9 @@ class PolicyTest(unittest.TestCase):
             with self.subTest(content_type=content_type):
                 self.assertEqual(decide(message(content_type)), Handling.HANDOFF)
 
+    def test_reactions_are_only_stored(self):
+        self.assertEqual(decide(message(ContentType.REACTION)), Handling.STORE_ONLY)
+
     def test_outgoing_messages_are_only_stored(self):
         for content_type in ContentType:
             with self.subTest(content_type=content_type):

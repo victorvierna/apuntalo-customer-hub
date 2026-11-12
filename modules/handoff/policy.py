@@ -30,6 +30,8 @@ POLICY: Mapping[ContentType, Handling] = MappingProxyType(
     {
         ContentType.TEXT: Handling.ASSISTANT,
         ContentType.MEDIA: Handling.HANDOFF,
+        # The contact is not asking anything, but a person can see it in the dashboard.
+        ContentType.REACTION: Handling.STORE_ONLY,
         ContentType.UNSUPPORTED: Handling.HANDOFF,
     }
 )

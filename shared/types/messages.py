@@ -27,9 +27,12 @@ class ContentType(StrEnum):
     MEDIA = "media"
     """A photo or video that can be downloaded."""
 
+    REACTION = "reaction"
+    """A reaction sent as a message, such as a heart. ``body`` is the emoji."""
+
     UNSUPPORTED = "unsupported"
     """Content the channel does not let us read (voice notes, shared posts,
-    reels, links, reactions...)."""
+    reels, links...)."""
 
 
 class Direction(StrEnum):
@@ -76,6 +79,7 @@ class ChannelMessage:
     content_type: ContentType
     body: str | None
     """Text of the message. For ``TEXT`` it is always a string. For
+    ``REACTION`` it is the emoji. For
     ``UNSUPPORTED`` it describes what was sent (e.g. ``[Unsupported Type:
     voice_media]``) so a person knows what to look at. ``None`` for ``MEDIA``."""
 

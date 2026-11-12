@@ -59,7 +59,7 @@ class ReadMessagesTest(unittest.TestCase):
                 ContentType.UNSUPPORTED,
                 ContentType.MEDIA,
                 ContentType.UNSUPPORTED,
-                ContentType.UNSUPPORTED,
+                ContentType.REACTION,
                 ContentType.TEXT,
             ],
         )

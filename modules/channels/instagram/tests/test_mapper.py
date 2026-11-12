@@ -38,12 +38,22 @@ class ToMessageTest(unittest.TestCase):
             "2": "[Unsupported Type: voice_media]",
             "3": "[Unsupported Type: xma_media_share]",
             "4": "[Instagram CLI successfully blocked a brainrot]",
-            "7": "[Sent a ❤️]",
         }
         for key, body in expected.items():
             with self.subTest(body=body):
                 self.assertEqual(self.messages[key].content_type, ContentType.UNSUPPORTED)
                 self.assertEqual(self.messages[key].body, body)
+
+    def test_heart_is_a_reaction_with_the_emoji_as_body(self):
+        message = self.messages["7"]
+        self.assertEqual(message.content_type, ContentType.REACTION)
+        self.assertEqual(message.body, "❤️")
+
+    def test_other_sent_a_placeholders_are_not_reactions(self):
+        # instagram-cli also writes "[Sent a link]" for links it cannot read.
+        message = to_message(self._raw(itemType="placeholder", text="[Sent a link]"), THREAD_ID)
+        self.assertEqual(message.content_type, ContentType.UNSUPPORTED)
+        self.assertEqual(message.body, "[Sent a link]")
 
     def test_photo_is_media_without_body(self):
         message = self.messages["5"]
