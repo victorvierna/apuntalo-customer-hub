@@ -10,8 +10,9 @@ messages it already has (``UNIQUE (conversation_id, external_id)``).
 
 Do not trust instagram-cli's "sent" either: without our patch
 (``patches/instagram-private-api-send-fix.patch``) Instagram silently dropped
-13 out of 28 messages in our tests. ``send_text`` checks that the message
-really appears in the conversation unless told otherwise.
+13 out of 28 messages in our tests. The adapter logs a warning when it starts
+if the patch is missing (``send_patch.py``), and ``send_text`` checks that the
+message really appears in the conversation unless told otherwise.
 """
 
 import re
@@ -24,6 +25,7 @@ from shared.types.messages import ChannelConversation, ChannelMessage
 from .cli import InstagramCli
 from .errors import InstagramCliError, InstagramDeliveryError, InstagramFormatError
 from .mapper import CHANNEL, to_conversation, to_message
+from .send_patch import warn_if_send_patch_missing
 
 # instagram-cli treats an argument of 20+ digits as a conversation id. Anything
 # else is searched by username or title, and can even start a NEW conversation
@@ -44,6 +46,7 @@ class InstagramAdapter:
         self,
         cli: InstagramCli | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        check_send_patch: bool = True,
     ) -> None:
         """
         Args:
@@ -51,9 +54,13 @@ class InstagramAdapter:
                 with the account that logged in last.
             sleep: Waiting function used by the delivery check. Only tests
                 change it.
+            check_send_patch: Log a warning if instagram-cli is installed
+                without our send fix. Only tests turn it off.
         """
         self._cli = cli or InstagramCli()
         self._sleep = sleep
+        if check_send_patch:
+            warn_if_send_patch_missing(self._cli.executable)
 
     def list_conversations(self, limit: int = 20) -> list[ChannelConversation]:
         """Most recent conversations of the main inbox.

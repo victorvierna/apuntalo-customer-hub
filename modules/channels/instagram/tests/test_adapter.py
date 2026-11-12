@@ -20,7 +20,9 @@ SENT_ID = "30000000000000000000000000000000009"
 def adapter_with(runner: FakeRunner, sleeps: list | None = None) -> InstagramAdapter:
     """Adapter on a fake instagram-cli. Never really sleeps; records the waits."""
     sleeps = [] if sleeps is None else sleeps
-    return InstagramAdapter(InstagramCli(runner=runner), sleep=sleeps.append)
+    return InstagramAdapter(
+        InstagramCli(runner=runner), sleep=sleeps.append, check_send_patch=False
+    )
 
 
 class ListConversationsTest(unittest.TestCase):
