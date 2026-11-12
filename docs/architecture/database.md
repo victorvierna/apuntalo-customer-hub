@@ -142,8 +142,8 @@ aunque el adaptador la lea muchas veces.
 | `direction` | TEXT + CHECK | `in` (nos llega) / `out` (enviamos). Permite filtrar los entrantes, que son los que disparan el procesamiento. |
 | `author` | TEXT + CHECK | `contact`, `assistant` o `human`. Distingue si una respuesta saliente la escribió el bot o una persona. Es imprescindible para medir cuánto resuelve el asistente por sí solo. |
 | `author_user_id` | FK → `users`, opcional | Qué persona del equipo respondió, si `author = 'human'`. |
-| `content_type` | TEXT + CHECK | `text`, `media` (foto u otro archivo que se puede descargar) o `unsupported` (audio, publicación compartida, reel…: contenido que el canal no nos deja leer). El asistente solo responde a `text`; el resto se deriva con `reason = 'unsupported_content'`. |
-| `body` | TEXT, opcional | Texto del mensaje. Obligatorio si `content_type = 'text'` (lo garantiza un `CHECK`). En `unsupported` guarda la descripción que da el canal (p. ej. `[Unsupported Type: voice_media]`) para que Bárbara sepa qué tipo de mensaje era. Puede faltar en `media`. |
+| `content_type` | TEXT + CHECK | `text`, `image` (foto), `video`, `audio` (nota de voz), `reaction` (p. ej. un ❤️ enviado como mensaje) o `unsupported` (publicación compartida, reel, enlace…: contenido que el canal no nos deja leer). Qué se hace con cada tipo lo decide `modules/handoff/policy.py`: hoy el asistente solo intenta responder a `text`, `reaction` solo se guarda y el resto se deriva con `reason = 'unsupported_content'`. Separar foto, vídeo y audio permite cambiar esa regla cuando haya modelos que lean imágenes o transcriban audio. |
+| `body` | TEXT, opcional | Texto del mensaje. Obligatorio si `content_type = 'text'` (lo garantiza un `CHECK`). En `reaction` es el emoji. En `unsupported` guarda la descripción que da el canal (p. ej. `[Unsupported Type: xma_media_share]`) para que Bárbara sepa qué tipo de mensaje era. Falta en `image`, `video` y `audio`. |
 | `media_path` | TEXT, opcional | Ruta del archivo descargado, relativa a `storage/` (p. ej. `media/<id>.jpg`). Contiene datos de clientes: nunca va a git. |
 | `external_id` | TEXT, opcional | Id del mensaje en el canal. Sirve para detectar duplicados y para referenciarlo al responder. Es opcional porque un mensaje saliente no lo tiene hasta que el canal confirma el envío. |
 | `delivery_status` | TEXT, opcional | Para salientes: `sent` / `failed`. Si el canal rechaza el envío, el dashboard puede avisar y permitir reintentar. |
@@ -335,7 +335,8 @@ CREATE TABLE messages (
   author           TEXT NOT NULL CHECK (author IN ('contact', 'assistant', 'human')),
   author_user_id   INTEGER REFERENCES users(id),
   content_type     TEXT NOT NULL DEFAULT 'text'
-                   CHECK (content_type IN ('text', 'media', 'unsupported')),
+                   CHECK (content_type IN ('text', 'image', 'video', 'audio',
+                                          'reaction', 'unsupported')),
   body             TEXT,
   media_path       TEXT,
   external_id      TEXT,

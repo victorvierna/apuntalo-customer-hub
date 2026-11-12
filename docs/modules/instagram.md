@@ -11,7 +11,9 @@ Instagram ⇄ instagram-cli ⇄ cli.py → mapper.py → adapter.py ⇄ resto de
 ```
 
 Solo habla con Instagram: **no guarda nada en la base de datos, no decide respuestas y no
-deriva conversaciones**. Eso es trabajo de otros módulos.
+deriva conversaciones**. Eso es trabajo de otros módulos. Tampoco decide qué se hace con cada
+tipo de mensaje: solo dice qué es (`content_type`). La regla está en
+`modules/handoff/policy.py`.
 
 ## Archivos
 
@@ -21,6 +23,8 @@ deriva conversaciones**. Eso es trabajo de otros módulos.
 | `cli.py` | `InstagramCli`: ejecuta instagram-cli (sin shell) y devuelve el `data` de su JSON. |
 | `mapper.py` | Traduce el JSON a los tipos comunes. Funciones puras, sin red. |
 | `errors.py` | Errores del adaptador (todos heredan de `InstagramCliError`). |
+| `send_patch.py` | Comprueba al arrancar que nuestro parche está aplicado y avisa si no. |
+| `install.sh` | Instala instagram-cli con todos los parches (ver "Instalación"). |
 | `patches/` | Parche propio para instagram-cli que evita que se pierdan mensajes (ver "Mensajes perdidos"). |
 | `tests/` | Tests con `unittest` y respuestas de ejemplo (`fixtures/`, datos inventados). |
 
@@ -59,16 +63,27 @@ si el mensaje se ha perdido.
 | Lo que envía el cliente | `itemType` en instagram-cli | `content_type` | `body` |
 |---|---|---|---|
 | Texto | `text` | `text` | el texto |
-| Foto o vídeo de la galería | `media` | `media` | `None` (se descarga con `download_media`) |
-| Audio | `placeholder` | `unsupported` | `[Unsupported Type: voice_media]` |
+| Foto de la galería | `media` (`mediaType` 1) | `image` | `None` (se descarga con `download_media`) |
+| Vídeo de la galería | `media` (`mediaType` 2) | `video` | `None` (se descarga con `download_media`) |
+| Otro tipo de media (p. ej. álbum) | `media` | `unsupported` | `[media type <n>]` |
+| Nota de voz | `placeholder` | `audio` | `None` (instagram-cli no da el archivo) |
+| Corazón enviado como mensaje | `placeholder` | `reaction` | `❤️` |
 | Publicación compartida | `placeholder` / `media_share` | `unsupported` | `[Unsupported Type: xma_media_share]` / `[media_share]` |
 | Reel o foto temporal | `placeholder` | `unsupported` | `[Instagram CLI successfully blocked a brainrot]` |
-| Reacción | `placeholder` | `unsupported` | `[Sent a ❤️]` |
-| Enlace | `link` | `unsupported` | `[link]` (instagram-cli no incluye la URL en el JSON) |
+| Enlace | `link` / `placeholder` | `unsupported` | `[link]` / `[Sent a link]` (instagram-cli no incluye la URL en el JSON) |
 | Cualquier tipo nuevo | — | `unsupported` | `[<itemType>]` |
 
-El asistente solo responde a `text`. Todo lo demás se deriva a una persona
-(`handoffs.reason = 'unsupported_content'`); el `body` le dice qué tipo de mensaje era.
+Qué se hace con cada tipo lo decide `modules/handoff/policy.py`. Hoy el asistente solo intenta
+responder a `text`, las reacciones solo se guardan (se ven en el dashboard sin abrir una
+derivación) y todo lo demás se deriva a una persona (`handoffs.reason =
+'unsupported_content'`). Foto, vídeo y audio van separados para que, cuando haya un modelo
+que lea imágenes o transcriba audio, baste con cambiar una línea de la política.
+
+- **Reacciones:** solo llega el corazón enviado como mensaje (`[Sent a ❤️]`, exactamente ese
+  texto). Las reacciones a un mensaje concreto (mantener pulsado) no aparecen en el JSON de
+  `read` de instagram-cli 2.1.0, así que hoy no nos llegan.
+- **Notas de voz:** instagram-cli 2.1.0 no da el archivo de audio, solo dice que hay una. Para
+  transcribirlas habría que conseguir el audio de otra forma.
 
 ## Reglas importantes (comprobadas con mensajes reales)
 
@@ -130,15 +145,24 @@ puede comprobar más tarde con `is_delivered`.
 
 ## Instalación de instagram-cli
 
-Requiere **Node.js 22 o superior**. Probado con la versión **2.1.0**.
+Requiere **Node.js 22 o superior**, `npm` y `patch`. Probado con la versión **2.1.0**.
 
 ```bash
-npm install -g --prefix ~/.local @i7m/instagram-cli@2.1.0   # sin sudo; ~/.local/bin debe estar en el PATH
+modules/channels/instagram/install.sh   # instala en ~/.local sin sudo; ~/.local/bin debe estar en el PATH
+```
+
+Se puede ejecutar las veces que haga falta (por ejemplo, después de reinstalar o actualizar
+instagram-cli): siempre termina con el parche aplicado o con un error claro. Para instalar en
+otra carpeta: `INSTAGRAM_CLI_PREFIX=/otra/carpeta modules/channels/instagram/install.sh`.
+
+El script hace estos tres pasos, que también se pueden hacer a mano:
+
+```bash
+npm install -g --prefix ~/.local @i7m/instagram-cli@2.1.0
 (cd ~/.local/lib/node_modules/@i7m/instagram-cli && npx patch-package)   # parches de instagram-cli (nota 1)
 patch -p1 -N \
   -d ~/.local/lib/node_modules/@i7m/instagram-cli/node_modules/instagram-private-api \
   < modules/channels/instagram/patches/instagram-private-api-send-fix.patch   # nuestro parche (nota 2)
-instagram-cli --version
 ```
 
 **Nota 1:** las versiones recientes de npm bloquean el script de instalación del paquete, que
@@ -157,9 +181,12 @@ patch -p1 -R --dry-run -s \
   < modules/channels/instagram/patches/instagram-private-api-send-fix.patch && echo aplicado
 ```
 
-Reinstalar o actualizar instagram-cli borra el parche: hay que volver a aplicarlo. Si al
-actualizar el parche no se aplica, comprobar si instagram-cli ya corrigió el bug (#349) y, si
-no, rehacerlo para la nueva versión de `instagram-private-api`.
+Reinstalar o actualizar instagram-cli borra el parche: hay que volver a ejecutar
+`install.sh`. Para que no pase sin que nadie se entere, **el adaptador lo comprueba al
+crearse** (`send_patch.py` busca las marcas `// apuntalo:` que añade el parche) y, si falta o
+no puede comprobarlo, escribe un aviso en el log. Si al actualizar el parche no se aplica,
+comprobar si instagram-cli ya corrigió el bug (#349) y, si no, rehacerlo para la nueva versión
+de `instagram-private-api`.
 
 ### Iniciar sesión (una vez, a mano)
 

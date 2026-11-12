@@ -44,6 +44,7 @@ necesite intervención humana se deriva a Bárbara (equipo de Apúntalo).
 ## Comandos
 - Crear la base de datos: `python shared/db/init_db.py` (solo usa la librería estándar).
 - Tests: `python -m unittest` desde la raíz del repo (usa `unittest`, de la librería estándar).
+- Instalar instagram-cli con nuestro parche: `modules/channels/instagram/install.sh`.
 - TODO: el resto (instalación, ejecución) está pendiente. No inventes esos comandos.
 
 ## Git y Pull Requests
