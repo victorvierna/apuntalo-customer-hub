@@ -27,7 +27,12 @@ class PolicyTest(unittest.TestCase):
         self.assertEqual(decide(message(ContentType.TEXT)), Handling.ASSISTANT)
 
     def test_content_the_assistant_cannot_read_goes_to_a_person(self):
-        for content_type in (ContentType.MEDIA, ContentType.UNSUPPORTED):
+        for content_type in (
+            ContentType.IMAGE,
+            ContentType.VIDEO,
+            ContentType.AUDIO,
+            ContentType.UNSUPPORTED,
+        ):
             with self.subTest(content_type=content_type):
                 self.assertEqual(decide(message(content_type)), Handling.HANDOFF)
 

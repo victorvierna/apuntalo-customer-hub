@@ -29,7 +29,13 @@ class Handling(StrEnum):
 POLICY: Mapping[ContentType, Handling] = MappingProxyType(
     {
         ContentType.TEXT: Handling.ASSISTANT,
-        ContentType.MEDIA: Handling.HANDOFF,
+        # Ready for a vision model: switch IMAGE to ASSISTANT once the
+        # assistant can read photos (download them with the adapter first).
+        ContentType.IMAGE: Handling.HANDOFF,
+        ContentType.VIDEO: Handling.HANDOFF,
+        # Ready for speech-to-text, but instagram-cli 2.1.0 does not give us
+        # the audio file, so there is nothing to transcribe yet.
+        ContentType.AUDIO: Handling.HANDOFF,
         # The contact is not asking anything, but a person can see it in the dashboard.
         ContentType.REACTION: Handling.STORE_ONLY,
         ContentType.UNSUPPORTED: Handling.HANDOFF,

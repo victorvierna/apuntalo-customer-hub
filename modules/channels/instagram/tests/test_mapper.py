@@ -35,7 +35,6 @@ class ToMessageTest(unittest.TestCase):
 
     def test_placeholders_are_unsupported_and_keep_their_description(self):
         expected = {
-            "2": "[Unsupported Type: voice_media]",
             "3": "[Unsupported Type: xma_media_share]",
             "4": "[Instagram CLI successfully blocked a brainrot]",
         }
@@ -55,10 +54,32 @@ class ToMessageTest(unittest.TestCase):
         self.assertEqual(message.content_type, ContentType.UNSUPPORTED)
         self.assertEqual(message.body, "[Sent a link]")
 
-    def test_photo_is_media_without_body(self):
-        message = self.messages["5"]
-        self.assertEqual(message.content_type, ContentType.MEDIA)
+    def test_voice_note_is_audio_without_body(self):
+        message = self.messages["2"]
+        self.assertEqual(message.content_type, ContentType.AUDIO)
         self.assertIsNone(message.body)
+
+    def test_photo_is_image_without_body(self):
+        message = self.messages["5"]
+        self.assertEqual(message.content_type, ContentType.IMAGE)
+        self.assertIsNone(message.body)
+
+    def test_video_is_video_without_body(self):
+        raw = self._media(mediaType=2)
+        message = to_message(raw, THREAD_ID)
+        self.assertEqual(message.content_type, ContentType.VIDEO)
+        self.assertIsNone(message.body)
+
+    def test_other_media_types_are_unsupported(self):
+        # 8 is an album in Instagram; we only know how to treat photos and videos.
+        album = self._media(mediaType=8)
+        without_media = self._media()
+        without_media.pop("media")
+        for raw, body in ((album, "[media type 8]"), (without_media, "[media type None]")):
+            with self.subTest(body=body):
+                message = to_message(raw, THREAD_ID)
+                self.assertEqual(message.content_type, ContentType.UNSUPPORTED)
+                self.assertEqual(message.body, body)
 
     def test_link_without_text_gets_a_description(self):
         # instagram-cli leaves links out of the JSON: no text, no url.
@@ -107,6 +128,12 @@ class ToMessageTest(unittest.TestCase):
     def test_not_an_object_raises(self):
         with self.assertRaises(InstagramFormatError):
             to_message(["not", "a", "dict"], THREAD_ID)
+
+    @staticmethod
+    def _media(**media):
+        raw = dict(fixture("read_all_types.json")["data"]["messages"][4])
+        raw["media"] = {"id": "1000000000000002", **media}
+        return raw
 
     @staticmethod
     def _raw(**changes):

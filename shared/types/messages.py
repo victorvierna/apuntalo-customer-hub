@@ -24,15 +24,22 @@ class ContentType(StrEnum):
     TEXT = "text"
     """Plain text."""
 
-    MEDIA = "media"
-    """A photo or video that can be downloaded."""
+    IMAGE = "image"
+    """A photo that can be downloaded."""
+
+    VIDEO = "video"
+    """A video that can be downloaded."""
+
+    AUDIO = "audio"
+    """A voice note. The channel may not let us download it (Instagram does
+    not, through instagram-cli 2.1.0)."""
 
     REACTION = "reaction"
     """A reaction sent as a message, such as a heart. ``body`` is the emoji."""
 
     UNSUPPORTED = "unsupported"
     """Content the channel does not let us read (voice notes, shared posts,
-    reels, links...)."""
+    reels, links...). ``body`` says what it was."""
 
 
 class Direction(StrEnum):
@@ -81,7 +88,8 @@ class ChannelMessage:
     """Text of the message. For ``TEXT`` it is always a string. For
     ``REACTION`` it is the emoji. For
     ``UNSUPPORTED`` it describes what was sent (e.g. ``[Unsupported Type:
-    voice_media]``) so a person knows what to look at. ``None`` for ``MEDIA``."""
+    xma_media_share]``) so a person knows what to look at. ``None`` for
+    ``IMAGE``, ``VIDEO`` and ``AUDIO``."""
 
     created_at: datetime
     """When the channel says the message was sent. Timezone-aware (UTC)."""

@@ -128,7 +128,7 @@ class InstagramAdapter:
         )
 
     def download_media(self, conversation_id: str, message_id: str, destination: Path) -> Path:
-        """Downloads the photo or video of a ``MEDIA`` message.
+        """Downloads the photo or video of an ``IMAGE`` or ``VIDEO`` message.
 
         ``destination`` is a path without extension; instagram-cli adds the
         right one (``.jpg``...). Returns the final path of the file.

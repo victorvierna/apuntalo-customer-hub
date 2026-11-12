@@ -54,10 +54,10 @@ class ReadMessagesTest(unittest.TestCase):
             [m.content_type for m in messages],
             [
                 ContentType.TEXT,
+                ContentType.AUDIO,
                 ContentType.UNSUPPORTED,
                 ContentType.UNSUPPORTED,
-                ContentType.UNSUPPORTED,
-                ContentType.MEDIA,
+                ContentType.IMAGE,
                 ContentType.UNSUPPORTED,
                 ContentType.REACTION,
                 ContentType.TEXT,
