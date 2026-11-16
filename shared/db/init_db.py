@@ -85,7 +85,7 @@ CREATE TABLE messages (
   body             TEXT,
   media_path       TEXT,
   external_id      TEXT,
-  delivery_status  TEXT CHECK (delivery_status IN ('sent', 'failed')),
+  delivery_status  TEXT CHECK (delivery_status IN ('pending', 'sent', 'failed')),
   created_at       TEXT NOT NULL,
   UNIQUE (conversation_id, external_id),
   CHECK (content_type <> 'text' OR body IS NOT NULL)
@@ -115,6 +115,23 @@ CREATE TABLE processing_runs (
   CHECK (action <> 'answer' OR tier IN ('slm', 'llm')),
   CHECK (action NOT IN ('deny', 'handoff') OR tier = 'none'),
   CHECK (finished_at IS NULL OR outcome IS NOT NULL)
+) STRICT;
+
+CREATE TABLE inbound_queue (
+  id               INTEGER PRIMARY KEY,
+  message_id       INTEGER NOT NULL UNIQUE REFERENCES messages(id),
+  conversation_id  INTEGER NOT NULL REFERENCES conversations(id),
+  status           TEXT NOT NULL DEFAULT 'pending'
+                   CHECK (status IN ('pending', 'processing', 'done', 'failed')),
+  attempts         INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  run_id           INTEGER REFERENCES processing_runs(id),
+  error            TEXT,
+  enqueued_at      TEXT NOT NULL,
+  started_at       TEXT,
+  finished_at      TEXT,
+  CHECK (status = 'pending' OR started_at IS NOT NULL),
+  CHECK (status NOT IN ('done', 'failed') OR finished_at IS NOT NULL),
+  CHECK (status <> 'done' OR run_id IS NOT NULL)
 ) STRICT;
 
 CREATE TABLE run_messages (
@@ -218,6 +235,10 @@ CREATE INDEX idx_messages_conv       ON messages(conversation_id, created_at);
 CREATE INDEX idx_conversations_inbox ON conversations(status, last_message_at);
 CREATE INDEX idx_handoffs_status     ON handoffs(status, created_at);
 CREATE INDEX idx_run_messages_msg    ON run_messages(message_id);
+CREATE INDEX idx_queue_pending       ON inbound_queue(conversation_id, enqueued_at)
+                                     WHERE status = 'pending';
+CREATE INDEX idx_queue_processing    ON inbound_queue(started_at) WHERE status = 'processing';
+CREATE INDEX idx_messages_outbox     ON messages(created_at) WHERE delivery_status = 'pending';
 CREATE INDEX idx_model_calls_run     ON model_calls(run_id);
 CREATE INDEX idx_summaries_conv      ON conversation_summaries(conversation_id, created_at);
 CREATE INDEX idx_contacts_person     ON contacts(person_id);
