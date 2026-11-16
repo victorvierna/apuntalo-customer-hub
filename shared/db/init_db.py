@@ -19,7 +19,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB_PATH = REPO_ROOT / "storage" / "apuntalo-marketing-platform.db"
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # STRICT tables require SQLite 3.37 or newer, and json_valid() (used to check
 # routing_decisions.scores) is built in from 3.38.
@@ -115,6 +115,25 @@ CREATE TABLE processing_runs (
   CHECK (action <> 'answer' OR tier IN ('slm', 'llm')),
   CHECK (action NOT IN ('deny', 'handoff') OR tier = 'none'),
   CHECK (finished_at IS NULL OR outcome IS NOT NULL)
+) STRICT;
+
+CREATE TABLE inbound_queue (
+  id                        INTEGER PRIMARY KEY,
+  channel_account_id        INTEGER NOT NULL REFERENCES channel_accounts(id),
+  conversation_external_id  TEXT NOT NULL,
+  message_external_id       TEXT NOT NULL,
+  is_backfill               INTEGER NOT NULL DEFAULT 0 CHECK (is_backfill IN (0, 1)),
+  payload                   TEXT NOT NULL CHECK (json_valid(payload)),
+  status                    TEXT NOT NULL DEFAULT 'pending'
+                            CHECK (status IN ('pending', 'processing', 'done', 'failed')),
+  attempts                  INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  error                     TEXT,
+  enqueued_at               TEXT NOT NULL,
+  started_at                TEXT,
+  finished_at               TEXT,
+  UNIQUE (channel_account_id, message_external_id),
+  CHECK (status = 'pending' OR started_at IS NOT NULL),
+  CHECK (status NOT IN ('done', 'failed') OR finished_at IS NOT NULL)
 ) STRICT;
 
 CREATE TABLE run_messages (
@@ -218,6 +237,10 @@ CREATE INDEX idx_messages_conv       ON messages(conversation_id, created_at);
 CREATE INDEX idx_conversations_inbox ON conversations(status, last_message_at);
 CREATE INDEX idx_handoffs_status     ON handoffs(status, created_at);
 CREATE INDEX idx_run_messages_msg    ON run_messages(message_id);
+CREATE INDEX idx_queue_pending       ON inbound_queue(channel_account_id, conversation_external_id,
+                                                      enqueued_at)
+                                     WHERE status = 'pending';
+CREATE INDEX idx_queue_processing    ON inbound_queue(started_at) WHERE status = 'processing';
 CREATE INDEX idx_model_calls_run     ON model_calls(run_id);
 CREATE INDEX idx_summaries_conv      ON conversation_summaries(conversation_id, created_at);
 CREATE INDEX idx_contacts_person     ON contacts(person_id);

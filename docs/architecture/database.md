@@ -1,7 +1,7 @@
 # Arquitectura de la base de datos
 
 > **Estado:** propuesta para revisión (borrador)
-> **Fecha:** 2026-11-11 (actualizado el 2026-11-16: personas, identidades y bloqueos; datos del enrutador)
+> **Fecha:** 2026-11-11 (actualizado el 2026-11-16: personas, identidades y bloqueos; datos del enrutador; cola de entrada)
 > **Motor:** SQLite
 > **Alcance:** esquema de datos del núcleo (conversaciones, procesamiento, logging y derivación a Bárbara)
 
@@ -78,6 +78,7 @@ people ──< blocks (bloqueos de la persona, en cualquier canal o cuenta)
   └──< contacts (una identidad por canal)
                     │
 channel_accounts ─┐ │
+                  ├──< inbound_queue (cola: lo que lee el canal, antes de guardarlo)
                   ├─┴──< conversations ──< messages
                   │             │                │ (cada mensaje entrante; varios si llegan en ráfaga)
                   │             │                └──< run_messages >── processing_runs ──< model_calls
@@ -389,7 +390,7 @@ por qué y cuándo.
 
 En Instagram es habitual escribir una consulta en varios mensajes seguidos. Si cada uno se
 procesara por separado, el asistente contestaría varias veces a medias. El gateway agrupa los
-mensajes que llegan seguidos (ventana pendiente de fijar, decisión abierta 12) y crea **un**
+mensajes de una conversación que llegan seguidos a la cola (`inbound_queue`, 6.14) y crea **un**
 procesamiento para todos. Esta tabla une el procesamiento con sus mensajes.
 
 | Campo | Tipo | Por qué existe |
@@ -445,6 +446,80 @@ recalcular qué fase habría decidido.
 
 Como el resto del logging, **solo recibe inserciones**.
 
+### 6.14 `inbound_queue` — cola entre el lector del canal y el gateway
+
+Diseño acordado en `docs/architecture/gateway.md` (sección 2). La cola va **antes** de
+`messages`: el lector de cada canal (en Instagram, `modules/channels/instagram/poller.py`) lee
+las conversaciones cada cierto tiempo y encola cada mensaje **tal como lo da el canal**,
+traducido a los tipos de `shared/types/`. No toca `people`, `contacts`, `conversations` ni
+`messages`. Es el gateway quien lo guarda, resuelve la identidad y decide.
+
+```
+instagram-cli ──> lector ──encola──> inbound_queue ──coge──> gateway ──guarda──> messages ──> enrutador
+                  (canal)                                    (núcleo)
+```
+
+Ciclo de vida de cada fila:
+
+```
+pending ──(el gateway la coge)──> processing ──> done
+   ^                                  │
+   └──(colgada demasiado tiempo)──────┴──(varios intentos)──> failed
+```
+
+Funcionamiento del gateway, en bucle:
+
+1. **Rescatar las filas colgadas:** las que llevan demasiado tiempo en `processing` (el proceso
+   se cayó a medias) vuelven a `pending` con `attempts + 1`. Tras varios intentos pasan a
+   `failed` y el dashboard las muestra.
+2. **Buscar conversaciones listas:** las que tienen filas `pending` y llevan unos segundos sin
+   mensajes nuevos (ventana de la ráfaga, decisión abierta 12).
+3. **Coger la ráfaga entera** en una sola sentencia
+   (`UPDATE … SET status = 'processing' … RETURNING`), así dos procesos del gateway nunca cogen
+   lo mismo.
+4. **Procesarla:** guarda cada mensaje sin duplicados y crea **un** procesamiento para todos los
+   mensajes entrantes nuevos (`run_messages`). Al terminar, marca las filas `done`.
+
+Ejemplo: Ana escribe "hola", "una duda" y "¿cuánto cuesta el curso?" en pocos segundos. El
+lector los encola en una o dos pasadas. El gateway espera a que la conversación lleve 8 s sin
+mensajes nuevos, coge los tres, crea un solo procesamiento y responde una sola vez.
+
+**Las relecturas no cuentan como mensajes nuevos.** El lector vuelve a leer las conversaciones
+recientes en cada pasada y vuelve a encolar mensajes que ya conoce. El
+`UNIQUE (channel_account_id, message_external_id)` hace que esas relecturas no inserten nada
+(`INSERT … ON CONFLICT DO NOTHING`). Esto es imprescindible para las ráfagas: si cada relectura
+creara una fila nueva, la conversación nunca llevaría 8 s "en silencio" y no se procesaría
+nunca. También evita que la cola crezca sin control.
+
+**El historial no se contesta.** En la primera sincronización de una cuenta, el lector encola
+las conversaciones antiguas con `is_backfill = 1`. El gateway las guarda (identidad,
+conversación y mensajes, para que el dashboard tenga el hilo completo), pero no crea
+procesamiento ni las pasa al enrutador. Sin esta marca, los mensajes antiguos serían "nuevos"
+para la base de datos y el asistente los contestaría. Cómo decide el lector qué es historial es
+la decisión abierta 14.
+
+| Campo | Tipo | Por qué existe |
+|---|---|---|
+| `id` | INTEGER PK | Identificador interno. |
+| `channel_account_id` | FK → `channel_accounts` | Cuenta propia que leyó el mensaje: en ella entró y desde ella se responde. |
+| `conversation_external_id` | TEXT | Id de la conversación en el canal. Está también en `payload`; se repite en una columna para agrupar las ráfagas con un índice, sin abrir el JSON. |
+| `message_external_id` | TEXT | Id del mensaje en el canal. Con `UNIQUE (channel_account_id, message_external_id)`, un mensaje se encola una sola vez aunque el lector lo relea. |
+| `is_backfill` | INTEGER (booleano), por defecto `0` | `1` = historial de la primera sincronización: se guarda, pero no se contesta. |
+| `payload` | TEXT (JSON) | `ChannelConversation` + `ChannelMessage` tal como los da el adaptador. Un `CHECK` exige JSON válido. |
+| `status` | TEXT + CHECK | `pending`, `processing`, `done` o `failed` (ver ciclo de vida). |
+| `attempts` | INTEGER, por defecto `0` | Veces que se ha rescatado tras quedarse colgada. Evita reintentar sin fin. |
+| `error` | TEXT, opcional | Último error, para depurar las filas `failed`. |
+| `enqueued_at` | TEXT | Cuándo se encoló, **con nuestro reloj**. Se usa para la ventana de la ráfaga porque es fiable; la fecha del canal puede llegar con retraso. |
+| `started_at` | TEXT, opcional | Cuándo la cogió el gateway. Obligatorio salvo en `pending`. Sirve para detectar filas colgadas. |
+| `finished_at` | TEXT, opcional | Cuándo terminó. Obligatorio en `done` y `failed`. |
+
+**Diferencia con `run_messages`:** la cola es **lo que hay que hacer** (operativa: las filas
+`done` antiguas se pueden limpiar, decisión abierta 13). `run_messages` es **lo que se hizo**
+(histórico para las métricas, no se borra).
+
+**La salida (enviar respuestas)** puede seguir el mismo patrón en sentido contrario. Se
+diseñará con el envío de respuestas (`gateway.md`, sección 2).
+
 ## 7. Índices
 
 | Índice | Para qué consulta |
@@ -454,6 +529,8 @@ Como el resto del logging, **solo recibe inserciones**.
 | `handoffs(status, created_at)` | Derivaciones pendientes, de la más antigua a la más reciente. |
 | `run_messages(message_id)` | Ir de un mensaje a cómo se procesó. Ir de un procesamiento a sus mensajes ya lo cubre la clave primaria `(run_id, message_id)`. |
 | `routing_decisions(run_id, phase)` | Ir de un procesamiento a las fases del enrutador. Lo crea automáticamente el `UNIQUE (run_id, phase)`. |
+| `inbound_queue(channel_account_id, conversation_external_id, enqueued_at) WHERE status = 'pending'` | La consulta del gateway en cada vuelta: qué conversaciones tienen mensajes pendientes y cuándo llegó el último. Índice parcial: solo contiene lo pendiente, así sigue siendo pequeño aunque la cola acumule filas `done`. |
+| `inbound_queue(started_at) WHERE status = 'processing'` | Rescatar las filas colgadas. |
 | `model_calls(run_id)` | Ir de un procesamiento a sus llamadas y su coste. |
 | `conversation_summaries(conversation_id, created_at)` | Ver los resúmenes de un ticket en orden. |
 | `contacts(person_id)` | Ir de una persona a todas sus identidades (y de ahí a sus conversaciones). |
@@ -567,6 +644,25 @@ CREATE TABLE processing_runs (
   CHECK (finished_at IS NULL OR outcome IS NOT NULL)
 ) STRICT;
 
+CREATE TABLE inbound_queue (
+  id                        INTEGER PRIMARY KEY,
+  channel_account_id        INTEGER NOT NULL REFERENCES channel_accounts(id),
+  conversation_external_id  TEXT NOT NULL,
+  message_external_id       TEXT NOT NULL,
+  is_backfill               INTEGER NOT NULL DEFAULT 0 CHECK (is_backfill IN (0, 1)),
+  payload                   TEXT NOT NULL CHECK (json_valid(payload)),
+  status                    TEXT NOT NULL DEFAULT 'pending'
+                            CHECK (status IN ('pending', 'processing', 'done', 'failed')),
+  attempts                  INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  error                     TEXT,
+  enqueued_at               TEXT NOT NULL,
+  started_at                TEXT,
+  finished_at               TEXT,
+  UNIQUE (channel_account_id, message_external_id),
+  CHECK (status = 'pending' OR started_at IS NOT NULL),
+  CHECK (status NOT IN ('done', 'failed') OR finished_at IS NOT NULL)
+) STRICT;
+
 CREATE TABLE run_messages (
   run_id      INTEGER NOT NULL REFERENCES processing_runs(id),
   message_id  INTEGER NOT NULL REFERENCES messages(id),
@@ -668,6 +764,10 @@ CREATE INDEX idx_messages_conv       ON messages(conversation_id, created_at);
 CREATE INDEX idx_conversations_inbox ON conversations(status, last_message_at);
 CREATE INDEX idx_handoffs_status     ON handoffs(status, created_at);
 CREATE INDEX idx_run_messages_msg    ON run_messages(message_id);
+CREATE INDEX idx_queue_pending       ON inbound_queue(channel_account_id, conversation_external_id,
+                                                      enqueued_at)
+                                     WHERE status = 'pending';
+CREATE INDEX idx_queue_processing    ON inbound_queue(started_at) WHERE status = 'processing';
 CREATE INDEX idx_model_calls_run     ON model_calls(run_id);
 CREATE INDEX idx_summaries_conv      ON conversation_summaries(conversation_id, created_at);
 CREATE INDEX idx_contacts_person     ON contacts(person_id);
@@ -687,6 +787,8 @@ CREATE INDEX idx_blocks_proposed     ON blocks(created_at) WHERE status = 'propo
 | Acuerdo entre clasificador y árbitro | Procesamientos con fila `classifier` y `arbiter` en `routing_decisions`, comparando `action` y `tier` |
 | Respuestas bloqueadas por el gateway de salida | `processing_runs.output_result` distinto de `passed` |
 | Uso del *fallback* y *timeouts* | `model_calls` con `is_fallback = 1` o `status = 'timeout'` |
+| Mensajes esperando y atascados | `inbound_queue` agrupada por `status`; `failed` necesita revisión |
+| Tiempo en cola | `inbound_queue.started_at − enqueued_at` (incluye la espera de la ráfaga) |
 | % de derivaciones y motivo | `handoffs.reason`, agrupado |
 | Coste por día y por modelo | `SUM(model_calls.cost_micros)` agrupado por fecha y `model` |
 | Tiempo de respuesta del bot | `processing_runs.finished_at − started_at` |
@@ -702,7 +804,7 @@ CREATE INDEX idx_blocks_proposed     ON blocks(created_at) WHERE status = 'propo
 Si se quiere empezar con menos tablas:
 
 - **Imprescindibles:** `people`, `contacts`, `blocks`, `channel_accounts`, `conversations`,
-  `messages`, `processing_runs`, `run_messages`, `routing_decisions`, `model_calls`,
+  `messages`, `inbound_queue`, `processing_runs`, `run_messages`, `routing_decisions`, `model_calls`,
   `handoffs`, `faq_retrievals`, `conversation_summaries`. `channel_accounts` ya no es aplazable: trabajamos con varias
   cuentas, cada conversación se responde desde la suya y los bloqueos de Instagram indican
   en qué cuenta se detectaron.
@@ -723,14 +825,16 @@ se basa en una FAQ.
     `python shared/db/init_db.py`, solo usa la librería estándar de Python y se puede
     ejecutar varias veces sin problema: guarda la versión del esquema en
     `PRAGMA user_version` y solo lo aplica una vez.
-  - **Versión actual del esquema: 3.**
+  - **Versión actual del esquema: 4.**
     - La versión 2 añadió `people` y `blocks`, enlazó `contacts` con `people` y añadió
       `blocked_contact` a `processing_runs.gateway_result`.
-    - La versión 3 añade los datos del enrutador: las tablas `run_messages` y
+    - La versión 3 añadió los datos del enrutador: las tablas `run_messages` y
       `routing_decisions`; en `processing_runs`, los campos `topic`, `complexity`, `tier`,
       `decided_by`, `output_result` y `outcome`, más valores nuevos en `gateway_result` (sin
       `timeout`) y sin la columna `message_id`; y en `model_calls`, `tier`, `status` e
       `is_fallback`. Requiere SQLite 3.38 o superior (por `json_valid`).
+    - La versión 4 añade la cola entre el lector del canal y el gateway (`inbound_queue`), con
+      el diseño de `docs/architecture/gateway.md`.
     - No hay migraciones porque todavía no hay datos reales: si tienes una base de datos
       local de una versión anterior, el script avisa; bórrala y vuelve a crearla.
 - **El archivo `.db` contiene conversaciones reales de clientes.** Nunca va a git:
@@ -781,6 +885,14 @@ se basa en una FAQ.
     tanto es texto libre.
 11. **Qué es "realizar petición" (`action = 'request'`):** no está definido qué hace el
     sistema en ese caso. Por eso `request` no tiene `tier` obligatorio.
-12. **Ventana de agrupación de ráfagas:** cuánto espera el gateway sin mensajes nuevos antes
-    de procesar la ráfaga (propuesta inicial: unos 8 s). Es una decisión del código del
-    gateway, no del esquema.
+12. **Tiempos de la cola:** cuánto espera el gateway sin mensajes nuevos antes de procesar la
+    ráfaga (propuesta inicial: 8 s), cuándo se considera colgada una fila (propuesta: 5 min) y
+    cuántos intentos se permiten (propuesta: 3). Son decisiones del código, no del esquema. La
+    ventana depende también del intervalo del lector (`gateway.md`, decisión abierta 1).
+13. **Limpieza de la cola:** cada cuánto se borran las filas `done` antiguas de
+    `inbound_queue`. El histórico no se pierde, porque está en `messages`, `run_messages` y
+    `processing_runs`. Ojo: si se borra la fila de un mensaje que el lector todavía relee, se
+    volverá a encolar. No pasa nada, porque el gateway lo descarta como duplicado al guardarlo,
+    pero conviene borrar solo filas de mensajes que ya no aparecen en las lecturas.
+14. **Cómo detecta el lector el historial (`is_backfill`):** por ejemplo, todo lo que lee la
+    primera vez que sincroniza una cuenta, o lo anterior a una fecha de corte por cuenta.
