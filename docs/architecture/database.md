@@ -1,7 +1,7 @@
 # Arquitectura de la base de datos
 
 > **Estado:** propuesta para revisión (borrador)
-> **Fecha:** 2026-11-11 (actualizado el 2026-11-16: personas, identidades y bloqueos)
+> **Fecha:** 2026-11-11 (actualizado el 2026-11-16: personas, identidades y bloqueos; datos del enrutador)
 > **Motor:** SQLite
 > **Alcance:** esquema de datos del núcleo (conversaciones, procesamiento, logging y derivación a Bárbara)
 
@@ -79,9 +79,10 @@ people ──< blocks (bloqueos de la persona, en cualquier canal o cuenta)
                     │
 channel_accounts ─┐ │
                   ├─┴──< conversations ──< messages
-                  │             │                │ (cada mensaje entrante)
-                  │             │                └──< processing_runs ──< model_calls
-                  │             │                            └──────────< faq_retrievals
+                  │             │                │ (cada mensaje entrante; varios si llegan en ráfaga)
+                  │             │                └──< run_messages >── processing_runs ──< model_calls
+                  │             │                                             ├──< routing_decisions (una por fase)
+                  │             │                                             └──< faq_retrievals
                   │             ├──< conversation_summaries >── model_calls (el que generó el resumen)
                   │             └──< handoffs >── users (OPCIONAL, pendiente de revisión)
                   └──< blocks (cuenta en la que se detectó un bloqueo de Instagram)
@@ -207,21 +208,48 @@ necesita fiarse de los campos "no leído" o "última actividad" del canal, que n
 
 ### 6.5 `processing_runs` — decisión del Gateway y del Enrutador
 
-Una fila por cada mensaje entrante procesado. Se separa de `messages` porque describe
+Una fila por cada **entrada procesada**: un mensaje entrante o varios seguidos que el gateway
+agrupa en una ráfaga (p. ej. "hola" / "una duda" / "¿cuánto cuesta?"). Los mensajes de cada
+procesamiento están en `run_messages` (6.12). Se separa de `messages` porque describe
 **cómo** decidió el sistema, no **qué** se dijo, y porque un mismo mensaje podría
 reprocesarse (por ejemplo, tras un error).
+
+Aquí se guarda la **decisión final**, que es lo que consultan el dashboard y las métricas. El
+detalle de cada fase del enrutador (clasificador y, si duda, árbitro) está en
+`routing_decisions` (6.13).
 
 | Campo | Tipo | Por qué existe |
 |---|---|---|
 | `id` | INTEGER PK | Identificador interno. |
-| `message_id` | FK → `messages` | Mensaje entrante que se procesó. |
-| `gateway_result` | TEXT + CHECK | Resultado del gateway: `accepted`, `blocked_contact` (la persona tiene un bloqueo activo en `blocks`; no se le contesta), `blocked_injection`, `rate_limited`, `timeout` o `error`. El diagrama asigna al gateway evitar *prompt injection* y gestionar *timeouts* y *rate limits*. Este campo permite medir con qué frecuencia ocurre cada caso. |
-| `intent` | TEXT + CHECK, opcional | Clasificación de la entrada según el diagrama: `faq`, `request` (petición) u `out_of_faq` (fuera de FAQ). Es opcional porque si el gateway bloquea el mensaje, no llega a clasificarse. |
-| `action` | TEXT + CHECK, opcional | Salida decidida: `answer` (responder duda), `request` (realizar petición), `deny` (denegar servicio) o `handoff` (consultar a Bárbara). Es la base de la métrica principal: % de mensajes que resuelve el asistente. |
+| `gateway_result` | TEXT + CHECK | Resultado del gateway de entrada (ver tabla siguiente). Permite medir con qué frecuencia ocurre cada caso. |
+| `intent` | TEXT + CHECK, opcional | Clasificación de la entrada según el diagrama: `faq`, `request` (petición) u `out_of_faq` (fuera de FAQ). Vacío si el gateway no deja pasar la entrada. |
+| `topic` | TEXT, opcional | Temática de la consulta (p. ej. `precios`). Sin `CHECK` hasta que esté la lista de temas de las FAQ (decisión abierta 10). |
+| `complexity` | REAL 0–1, opcional | Complejidad estimada por el enrutador. Es la señal principal para elegir entre el modelo pequeño y el grande. |
+| `action` | TEXT + CHECK, opcional | Salida decidida: `answer` (responder duda), `request` (realizar petición), `deny` (denegar servicio) o `handoff` (consultar a Bárbara). Solo existe si `gateway_result = 'accepted'` (lo garantiza un `CHECK`). |
+| `tier` | TEXT + CHECK, opcional | Qué tipo de modelo responde: `slm` (pequeño, local), `llm` (grande, por API) o `none` (no se genera texto). Es **la decisión del enrutador**. `answer` exige `slm` o `llm`; `deny` y `handoff` se resuelven con plantillas y exigen `none`. |
+| `decided_by` | TEXT + CHECK, opcional | Qué fase tomó la decisión final: `rule` (regla fija), `classifier` (clasificador ligero) o `arbiter` (LLM que arbitra cuando el clasificador duda). Permite medir cuánto se escala y la latencia de cada fase por separado. |
+| `output_result` | TEXT + CHECK, opcional | Resultado del gateway de salida sobre la respuesta generada: `passed`, `no_grounding` (no hay FAQ que la respalde) o `rejected` (otro motivo, p. ej. demasiado larga o filtra instrucciones). Vacío si no se generó respuesta. |
+| `outcome` | TEXT + CHECK, opcional | Qué pasó al final: `replied`, `denied`, `handed_off`, `stored_only` o `failed`. No siempre coincide con `action`: si el enrutador decide `answer` pero el gateway de salida bloquea la respuesta, acaba en `handed_off`. Obligatorio cuando el procesamiento termina (`finished_at`). |
 | `reply_message_id` | FK → `messages`, opcional | Respuesta que se envió como resultado, si la hubo. Une la pregunta con su respuesta para depurar. |
 | `error` | TEXT, opcional | Detalle técnico si algo falló, para depurar sin tener que buscar en otros logs. |
 | `started_at` | TEXT | Inicio del procesamiento. |
 | `finished_at` | TEXT, opcional | Fin del procesamiento. La diferencia con `started_at` da el tiempo de respuesta de extremo a extremo. Vacío = el proceso no terminó (posible caída). |
+
+Valores de `gateway_result`:
+
+| Valor | Cuándo | `outcome` habitual |
+|---|---|---|
+| `accepted` | Pasa todas las comprobaciones y llega al enrutador. | Según la decisión |
+| `store_only` | La política de contenido (`modules/handoff/policy.py`) dice que solo se guarda, p. ej. una reacción. | `stored_only` |
+| `unsupported_content` | Foto, vídeo, audio o contenido que el asistente no puede leer: se deriva sin pasar por el enrutador. | `handed_off` |
+| `human_owned` | La conversación está en `waiting_human`: la lleva una persona y el asistente no contesta. | `stored_only` |
+| `blocked_contact` | La persona tiene un bloqueo activo en `blocks`. | `stored_only` |
+| `blocked_injection` | Se detecta un intento de *prompt injection*. | `stored_only` o `denied` |
+| `rate_limited` | La persona supera el límite de mensajes. | `stored_only` |
+| `error` | Falla el propio gateway. | `failed` |
+
+`timeout` ya no es un resultado del gateway: los *timeouts* ocurren al llamar a un modelo y se
+registran en `model_calls.status`.
 
 ### 6.6 `model_calls` — cada llamada a un modelo de IA
 
@@ -234,9 +262,12 @@ modelos esté en una sola tabla.
 |---|---|---|
 | `id` | INTEGER PK | Identificador interno. |
 | `run_id` | FK → `processing_runs`, opcional | Procesamiento al que pertenece. Solo puede faltar en los resúmenes, que no responden a un mensaje entrante sino al cierre de un ticket. Un `CHECK` obliga a rellenarlo en cualquier otro caso. |
-| `purpose` | TEXT + CHECK | Para qué se llamó: `routing`, `answer` o `summary`. Permite separar el coste de decidir, el de responder y el de resumir. |
+| `purpose` | TEXT + CHECK | Para qué se llamó: `routing` (el LLM árbitro del enrutador), `answer` o `summary`. Permite separar el coste de decidir, el de responder y el de resumir. El clasificador ligero **no** se registra aquí: no genera texto, y su latencia queda en `routing_decisions`. |
 | `provider` | TEXT | Proveedor del modelo. El router puede escoger entre varios. |
 | `model` | TEXT | Modelo concreto. Permite comparar calidad y coste entre modelos, que es justo lo que tiene que optimizar el router. |
+| `tier` | TEXT + CHECK | `slm` o `llm`. Permite agrupar el tráfico y el coste por tipo de modelo aunque cambien los modelos concretos. |
+| `status` | TEXT + CHECK, por defecto `ok` | `ok`, `timeout` o `error`. Aquí se registran los *timeouts*. |
+| `is_fallback` | INTEGER (booleano), por defecto `0` | `1` si la llamada es un reintento con otro modelo porque el anterior falló (p. ej. el SLM agota el tiempo y se repite con el LLM). Permite medir cuántas veces se usa el *fallback*. |
 | `input_tokens` | INTEGER, opcional | Tokens de entrada. Es la base del coste y sirve para detectar prompts demasiado grandes. |
 | `output_tokens` | INTEGER, opcional | Tokens de salida. |
 | `cost_micros` | INTEGER, opcional | Coste en millonésimas de dólar. Se guarda calculado en el momento porque los precios de los modelos cambian, y así el histórico refleja lo que costó de verdad. |
@@ -354,6 +385,66 @@ del enrutador **no** bloquea hasta que Bárbara la confirma.
 No se borran filas: desbloquear es pasar a `lifted`, así queda el histórico de quién bloqueó,
 por qué y cuándo.
 
+### 6.12 `run_messages` — mensajes de cada procesamiento
+
+En Instagram es habitual escribir una consulta en varios mensajes seguidos. Si cada uno se
+procesara por separado, el asistente contestaría varias veces a medias. El gateway agrupa los
+mensajes que llegan seguidos (ventana pendiente de fijar, decisión abierta 12) y crea **un**
+procesamiento para todos. Esta tabla une el procesamiento con sus mensajes.
+
+| Campo | Tipo | Por qué existe |
+|---|---|---|
+| `run_id` | FK → `processing_runs` | Procesamiento. |
+| `message_id` | FK → `messages` | Mensaje incluido en él. |
+
+`PRIMARY KEY (run_id, message_id)`: un mensaje no puede estar dos veces en el mismo
+procesamiento. Sustituye a la antigua columna `processing_runs.message_id`, que solo permitía
+un mensaje. Así se sabe exactamente qué texto vio el enrutador y se puede reproducir su
+decisión.
+
+### 6.13 `routing_decisions` — cada fase del enrutador
+
+El enrutador decide en dos fases:
+
+1. **Clasificador** ligero y local (pocos milisegundos). Da su decisión y su confianza.
+2. **Árbitro**: solo si la confianza del clasificador queda por debajo del umbral, se
+   consulta a un LLM, que toma la decisión final.
+
+Antes de ambas puede actuar una **regla** fija (`rule`), por ejemplo para un saludo.
+
+Cada fase que actúa deja **una fila**. Lo normal es una fila (`classifier`). Si el
+clasificador duda, hay dos (`classifier` + `arbiter`). La decisión final se copia en
+`processing_runs`; aquí queda cómo se llegó a ella.
+
+Ejemplo de un mensaje ambiguo:
+
+| `phase` | `intent` | `tier` | `confidence` | `latency_ms` |
+|---|---|---|---|---|
+| `classifier` | `faq` | `slm` | 0.41 | 9 |
+| `arbiter` | `out_of_faq` | `none` | — | 640 |
+
+Guardar todas las fases permite medir cuántas veces se equivoca el clasificador (comparándolo
+con el árbitro), qué fracción se escala y la latencia de cada fase. Guardar las probabilidades
+(`scores`) permite además **simular otro umbral sin volver a ejecutar nada**: basta con
+recalcular qué fase habría decidido.
+
+| Campo | Tipo | Por qué existe |
+|---|---|---|
+| `id` | INTEGER PK | Identificador interno. |
+| `run_id` | FK → `processing_runs` | Procesamiento al que pertenece. |
+| `phase` | TEXT + CHECK | `rule`, `classifier` o `arbiter`. `UNIQUE (run_id, phase)`: una fila por fase. |
+| `intent`, `topic`, `complexity` | igual que en `processing_runs` | Lo que dijo **esta fase**. |
+| `action`, `tier` | igual que en `processing_runs` | Decisión de **esta fase**. Obligatorias. |
+| `confidence` | REAL 0–1, opcional | Confianza de la fase, que se compara con el umbral. Obligatoria en `classifier`. |
+| `threshold` | REAL 0–1, opcional | Umbral vigente **en ese momento**. Si se cambia, los datos antiguos siguen interpretándose bien. Obligatorio en `classifier`. |
+| `scores` | TEXT (JSON), opcional | Probabilidad de cada clase, p. ej. `{"slm": 0.41, "llm": 0.59}`. Obligatorio en `classifier`; un `CHECK` exige JSON válido. |
+| `router_version` | TEXT | Versión del clasificador o del prompt del árbitro. Separa los datos de cada versión cuando se reentrena. |
+| `latency_ms` | INTEGER | Cuánto tardó la fase. Es la medida del sobrecoste del enrutamiento. |
+| `model_call_id` | FK → `model_calls`, opcional | Llamada al LLM árbitro. Obligatoria en `arbiter`, así su coste y sus tokens quedan en `model_calls` como el resto. |
+| `created_at` | TEXT | Momento de la decisión. |
+
+Como el resto del logging, **solo recibe inserciones**.
+
 ## 7. Índices
 
 | Índice | Para qué consulta |
@@ -361,7 +452,8 @@ por qué y cuándo.
 | `messages(conversation_id, created_at)` | Mostrar el hilo de una conversación en orden. |
 | `conversations(status, last_message_at)` | Bandeja del dashboard filtrada por estado y ordenada por actividad. |
 | `handoffs(status, created_at)` | Derivaciones pendientes, de la más antigua a la más reciente. |
-| `processing_runs(message_id)` | Ir de un mensaje a cómo se procesó. |
+| `run_messages(message_id)` | Ir de un mensaje a cómo se procesó. Ir de un procesamiento a sus mensajes ya lo cubre la clave primaria `(run_id, message_id)`. |
+| `routing_decisions(run_id, phase)` | Ir de un procesamiento a las fases del enrutador. Lo crea automáticamente el `UNIQUE (run_id, phase)`. |
 | `model_calls(run_id)` | Ir de un procesamiento a sus llamadas y su coste. |
 | `conversation_summaries(conversation_id, created_at)` | Ver los resúmenes de un ticket en orden. |
 | `contacts(person_id)` | Ir de una persona a todas sus identidades (y de ahí a sus conversaciones). |
@@ -451,16 +543,34 @@ CREATE TABLE messages (
 
 CREATE TABLE processing_runs (
   id                INTEGER PRIMARY KEY,
-  message_id        INTEGER NOT NULL REFERENCES messages(id),
   gateway_result    TEXT NOT NULL
-                    CHECK (gateway_result IN ('accepted', 'blocked_contact', 'blocked_injection',
-                                              'rate_limited', 'timeout', 'error')),
+                    CHECK (gateway_result IN ('accepted', 'store_only', 'unsupported_content',
+                                              'human_owned', 'blocked_contact',
+                                              'blocked_injection', 'rate_limited', 'error')),
   intent            TEXT CHECK (intent IN ('faq', 'request', 'out_of_faq')),
+  topic             TEXT,
+  complexity        REAL CHECK (complexity BETWEEN 0 AND 1),
   action            TEXT CHECK (action IN ('answer', 'request', 'deny', 'handoff')),
+  tier              TEXT CHECK (tier IN ('slm', 'llm', 'none')),
+  decided_by        TEXT CHECK (decided_by IN ('rule', 'classifier', 'arbiter')),
+  output_result     TEXT CHECK (output_result IN ('passed', 'no_grounding', 'rejected')),
+  outcome           TEXT CHECK (outcome IN ('replied', 'denied', 'handed_off',
+                                            'stored_only', 'failed')),
   reply_message_id  INTEGER REFERENCES messages(id),
   error             TEXT,
   started_at        TEXT NOT NULL,
-  finished_at       TEXT
+  finished_at       TEXT,
+  CHECK (gateway_result = 'accepted' OR action IS NULL),
+  CHECK (action IS NULL OR (tier IS NOT NULL AND decided_by IS NOT NULL)),
+  CHECK (action <> 'answer' OR tier IN ('slm', 'llm')),
+  CHECK (action NOT IN ('deny', 'handoff') OR tier = 'none'),
+  CHECK (finished_at IS NULL OR outcome IS NOT NULL)
+) STRICT;
+
+CREATE TABLE run_messages (
+  run_id      INTEGER NOT NULL REFERENCES processing_runs(id),
+  message_id  INTEGER NOT NULL REFERENCES messages(id),
+  PRIMARY KEY (run_id, message_id)
 ) STRICT;
 
 CREATE TABLE model_calls (
@@ -469,12 +579,37 @@ CREATE TABLE model_calls (
   purpose        TEXT NOT NULL CHECK (purpose IN ('routing', 'answer', 'summary')),
   provider       TEXT NOT NULL,
   model          TEXT NOT NULL,
+  tier           TEXT NOT NULL CHECK (tier IN ('slm', 'llm')),
+  status         TEXT NOT NULL DEFAULT 'ok' CHECK (status IN ('ok', 'timeout', 'error')),
+  is_fallback    INTEGER NOT NULL DEFAULT 0 CHECK (is_fallback IN (0, 1)),
   input_tokens   INTEGER,
   output_tokens  INTEGER,
   cost_micros    INTEGER,
   latency_ms     INTEGER,
   created_at     TEXT NOT NULL,
   CHECK (run_id IS NOT NULL OR purpose = 'summary')
+) STRICT;
+
+CREATE TABLE routing_decisions (
+  id              INTEGER PRIMARY KEY,
+  run_id          INTEGER NOT NULL REFERENCES processing_runs(id),
+  phase           TEXT NOT NULL CHECK (phase IN ('rule', 'classifier', 'arbiter')),
+  intent          TEXT CHECK (intent IN ('faq', 'request', 'out_of_faq')),
+  topic           TEXT,
+  complexity      REAL CHECK (complexity BETWEEN 0 AND 1),
+  action          TEXT NOT NULL CHECK (action IN ('answer', 'request', 'deny', 'handoff')),
+  tier            TEXT NOT NULL CHECK (tier IN ('slm', 'llm', 'none')),
+  confidence      REAL CHECK (confidence BETWEEN 0 AND 1),
+  threshold       REAL CHECK (threshold BETWEEN 0 AND 1),
+  scores          TEXT CHECK (scores IS NULL OR json_valid(scores)),
+  router_version  TEXT NOT NULL,
+  latency_ms      INTEGER NOT NULL,
+  model_call_id   INTEGER REFERENCES model_calls(id),
+  created_at      TEXT NOT NULL,
+  UNIQUE (run_id, phase),
+  CHECK (phase <> 'classifier'
+         OR (confidence IS NOT NULL AND threshold IS NOT NULL AND scores IS NOT NULL)),
+  CHECK (phase <> 'arbiter' OR model_call_id IS NOT NULL)
 ) STRICT;
 
 CREATE TABLE conversation_summaries (
@@ -532,7 +667,7 @@ CREATE TABLE blocks (
 CREATE INDEX idx_messages_conv       ON messages(conversation_id, created_at);
 CREATE INDEX idx_conversations_inbox ON conversations(status, last_message_at);
 CREATE INDEX idx_handoffs_status     ON handoffs(status, created_at);
-CREATE INDEX idx_runs_message        ON processing_runs(message_id);
+CREATE INDEX idx_run_messages_msg    ON run_messages(message_id);
 CREATE INDEX idx_model_calls_run     ON model_calls(run_id);
 CREATE INDEX idx_summaries_conv      ON conversation_summaries(conversation_id, created_at);
 CREATE INDEX idx_contacts_person     ON contacts(person_id);
@@ -545,7 +680,13 @@ CREATE INDEX idx_blocks_proposed     ON blocks(created_at) WHERE status = 'propo
 
 | Métrica | De dónde sale |
 |---|---|
-| % de mensajes resueltos por el asistente | `processing_runs` con `action = 'answer'` / total |
+| % de mensajes resueltos por el asistente | `processing_runs` con `outcome = 'replied'` / total |
+| Tráfico y coste por tipo de modelo | `processing_runs.tier` agrupado; `SUM(model_calls.cost_micros)` agrupado por `tier` |
+| % de decisiones escaladas al árbitro | `processing_runs` con `decided_by = 'arbiter'` / procesamientos con `action` |
+| Sobrecoste de latencia del enrutador | `routing_decisions.latency_ms` por `phase` (p. ej. p95 de `classifier`) |
+| Acuerdo entre clasificador y árbitro | Procesamientos con fila `classifier` y `arbiter` en `routing_decisions`, comparando `action` y `tier` |
+| Respuestas bloqueadas por el gateway de salida | `processing_runs.output_result` distinto de `passed` |
+| Uso del *fallback* y *timeouts* | `model_calls` con `is_fallback = 1` o `status = 'timeout'` |
 | % de derivaciones y motivo | `handoffs.reason`, agrupado |
 | Coste por día y por modelo | `SUM(model_calls.cost_micros)` agrupado por fecha y `model` |
 | Tiempo de respuesta del bot | `processing_runs.finished_at − started_at` |
@@ -561,8 +702,8 @@ CREATE INDEX idx_blocks_proposed     ON blocks(created_at) WHERE status = 'propo
 Si se quiere empezar con menos tablas:
 
 - **Imprescindibles:** `people`, `contacts`, `blocks`, `channel_accounts`, `conversations`,
-  `messages`, `processing_runs`, `model_calls`, `handoffs`, `faq_retrievals`,
-  `conversation_summaries`. `channel_accounts` ya no es aplazable: trabajamos con varias
+  `messages`, `processing_runs`, `run_messages`, `routing_decisions`, `model_calls`,
+  `handoffs`, `faq_retrievals`, `conversation_summaries`. `channel_accounts` ya no es aplazable: trabajamos con varias
   cuentas, cada conversación se responde desde la suya y los bloqueos de Instagram indican
   en qué cuenta se detectaron.
 - **Opcional / pendiente de revisión:** `users`. No está decidido si será necesaria (ver 6.8).
@@ -582,10 +723,16 @@ se basa en una FAQ.
     `python shared/db/init_db.py`, solo usa la librería estándar de Python y se puede
     ejecutar varias veces sin problema: guarda la versión del esquema en
     `PRAGMA user_version` y solo lo aplica una vez.
-  - **Versión actual del esquema: 2** (añade `people` y `blocks`, enlaza `contacts` con
-    `people` y añade `blocked_contact` a `processing_runs.gateway_result`). No hay migración
-    desde la versión 1 porque todavía no hay datos reales: si tienes una base de datos local
-    de la versión 1, el script avisa; bórrala y vuelve a crearla.
+  - **Versión actual del esquema: 3.**
+    - La versión 2 añadió `people` y `blocks`, enlazó `contacts` con `people` y añadió
+      `blocked_contact` a `processing_runs.gateway_result`.
+    - La versión 3 añade los datos del enrutador: las tablas `run_messages` y
+      `routing_decisions`; en `processing_runs`, los campos `topic`, `complexity`, `tier`,
+      `decided_by`, `output_result` y `outcome`, más valores nuevos en `gateway_result` (sin
+      `timeout`) y sin la columna `message_id`; y en `model_calls`, `tier`, `status` e
+      `is_fallback`. Requiere SQLite 3.38 o superior (por `json_valid`).
+    - No hay migraciones porque todavía no hay datos reales: si tienes una base de datos
+      local de una versión anterior, el script avisa; bórrala y vuelve a crearla.
 - **El archivo `.db` contiene conversaciones reales de clientes.** Nunca va a git:
   `.gitignore` excluye `storage/` y los archivos `*.db`, `*.db-wal` y `*.db-shm`. Tampoco
   puede ir en `data/faqs/`.
@@ -630,3 +777,10 @@ se basa en una FAQ.
 9. **Quién decide una propuesta de bloqueo:** si se crea la tabla `users`, se puede añadir a
    `blocks` quién confirmó, rechazó o quitó cada bloqueo. Mientras solo esté Bárbara, no hace
    falta.
+10. **Lista de temáticas (`topic`):** se cerrará con un `CHECK` cuando estén las FAQ. Mientras
+    tanto es texto libre.
+11. **Qué es "realizar petición" (`action = 'request'`):** no está definido qué hace el
+    sistema en ese caso. Por eso `request` no tiene `tier` obligatorio.
+12. **Ventana de agrupación de ráfagas:** cuánto espera el gateway sin mensajes nuevos antes
+    de procesar la ráfaga (propuesta inicial: unos 8 s). Es una decisión del código del
+    gateway, no del esquema.
