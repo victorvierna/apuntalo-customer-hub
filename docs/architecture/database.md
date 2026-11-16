@@ -1,7 +1,7 @@
 # Arquitectura de la base de datos
 
 > **Estado:** propuesta para revisión (borrador)
-> **Fecha:** 2026-11-11
+> **Fecha:** 2026-11-11 (actualizado el 2026-11-16: personas, identidades y bloqueos)
 > **Motor:** SQLite
 > **Alcance:** esquema de datos del núcleo (conversaciones, procesamiento, logging y derivación a Bárbara)
 
@@ -73,13 +73,18 @@ y concentraremos el acceso a datos en un único sitio del código.
 ## 5. Diagrama de entidades
 
 ```
-channel_accounts ─┐
-                  ├──< conversations ──< messages
-contacts ─────────┘         │                │ (cada mensaje entrante)
-                            │                └──< processing_runs ──< model_calls
-                            │                            └──────────< faq_retrievals
-                            ├──< conversation_summaries >── model_calls (el que generó el resumen)
-                            └──< handoffs >── users (OPCIONAL, pendiente de revisión)
+people ──< blocks (bloqueos de la persona, en cualquier canal o cuenta)
+  │
+  └──< contacts (una identidad por canal)
+                    │
+channel_accounts ─┐ │
+                  ├─┴──< conversations ──< messages
+                  │             │                │ (cada mensaje entrante)
+                  │             │                └──< processing_runs ──< model_calls
+                  │             │                            └──────────< faq_retrievals
+                  │             ├──< conversation_summaries >── model_calls (el que generó el resumen)
+                  │             └──< handoffs >── users (OPCIONAL, pendiente de revisión)
+                  └──< blocks (cuenta en la que se detectó un bloqueo de Instagram)
 
 ──<  = relación uno a muchos
 ```
@@ -101,22 +106,67 @@ cuenta llegó cada conversación evita tener que rehacer el esquema cuando se a�
 
 `UNIQUE (channel, external_id)` impide registrar dos veces la misma cuenta.
 
-### 6.2 `contacts` — la persona que nos escribe
+### 6.2 `people` y `contacts` — la persona y sus identidades en cada canal
 
-Se separa de la conversación porque la misma persona puede abrir varias conversaciones a lo
-largo del tiempo, y conviene ver su historial completo.
+Una misma persona puede escribirnos desde varios canales o a varias de nuestras cuentas.
+Queremos saber que es la misma persona, tener a mano el contexto de todas sus conversaciones
+y, si está bloqueada en un sitio, no contestarle en ningún otro. Por eso hay dos niveles:
+
+- **`people`**: la persona. Lo que es "suyo", sea cual sea el canal: si es cliente y si
+  está bloqueada (a través de `blocks`, ver 6.11).
+- **`contacts`**: cada identidad de esa persona en un canal (su usuario de Instagram, en el
+  futuro su número de WhatsApp…). Sirve para reconocerla cuando escribe. Por qué cuenta
+  hay que responder no se guarda aquí, sino en `conversations.channel_account_id`.
+
+El contexto de una persona se obtiene así: `people` → todas sus `contacts` → todas sus
+`conversations` → `conversation_summaries`.
+
+#### `people`
 
 | Campo | Tipo | Por qué existe |
 |---|---|---|
 | `id` | INTEGER PK | Identificador interno. |
+| `display_name` | TEXT, opcional | Nombre que mostrar en el dashboard. Al principio se copia del primer contacto; Bárbara puede cambiarlo. |
+| `is_customer` | INTEGER, opcional | El diagrama distingue "cliente o no cliente". `1` = cliente, `0` = no cliente, `NULL` = no se sabe todavía. Usar `NULL` evita afirmar algo que no sabemos. Va en la persona porque ser cliente no depende del canal por el que escriba. |
+| `created_at` | TEXT | Primera vez que nos escribió, por cualquier canal. |
+
+No hay columna `is_blocked`: el bloqueo vive en `blocks` (6.11) porque hay que saber quién
+bloqueó, por qué y desde dónde, y poder desbloquear sin perder el histórico.
+
+#### `contacts`
+
+| Campo | Tipo | Por qué existe |
+|---|---|---|
+| `id` | INTEGER PK | Identificador interno. |
+| `person_id` | FK → `people` | Persona a la que pertenece esta identidad. Varias identidades pueden apuntar a la misma persona. |
 | `channel` | TEXT | Canal por el que nos contacta. |
 | `external_id` | TEXT | Id del usuario en el canal. Es lo que devuelve el adaptador del canal y se usa para encontrar al contacto existente. En Instagram es el `userId` numérico, no el nombre de usuario, porque el nombre puede cambiar. |
-| `display_name` | TEXT, opcional | Nombre que mostrar en la bandeja. Puede faltar si el canal no lo da. |
-| `is_customer` | INTEGER, opcional | El diagrama distingue "cliente o no cliente". `1` = cliente, `0` = no cliente, `NULL` = no se sabe todavía. Usar `NULL` evita afirmar algo que no sabemos. |
-| `is_blocked` | INTEGER (booleano), por defecto `0` | `1` si el contacto está bloqueado por alguna de nuestras cuentas. El dashboard lo señala para que nadie intente responderle, y el asistente no debe enviarle mensajes. A diferencia de `is_customer`, aquí siempre sabemos el valor (por defecto no está bloqueado), así que es `NOT NULL`. Solo indica *si* está bloqueado, no *por qué cuenta* (ver decisiones abiertas). |
-| `created_at` | TEXT | Primera vez que nos escribió. |
+| `username` | TEXT, opcional | Nombre de usuario en el canal (en Instagram, sin `@` y en minúsculas; un `CHECK` exige las minúsculas para que la comparación sea exacta). Se usa para **enlazar identidades a la misma persona** (ver más abajo). Opcional porque no todos los canales tienen nombre de usuario. |
+| `display_name` | TEXT, opcional | Nombre que da el canal para esta identidad. Puede faltar si el canal no lo da. |
+| `created_at` | TEXT | Primera vez que nos escribió desde esta identidad. |
 
-`UNIQUE (channel, external_id)`: una persona en un canal es un único contacto.
+`UNIQUE (channel, external_id)`: una identidad en un canal es un único contacto.
+
+**Cómo se decide a qué persona pertenece una identidad nueva** (lo hace el gateway al
+recibir un mensaje de un `external_id` que no conocemos):
+
+1. Si otro contacto del **mismo canal** tiene el **mismo `username`**, la identidad nueva se
+   enlaza a la persona de ese contacto. En Instagram, el nombre de usuario lo da el adaptador
+   en `ChannelConversation.participants` (el de `read` suele ser genérico, `User_<id>`, y no
+   sirve para esto).
+2. Si no, se crea una persona nueva.
+3. Entre canales distintos no hay un dato común fiable, así que el enlace lo hace una persona
+   desde el dashboard (fusionar dos personas: mover sus `contacts` y `blocks` a una y borrar
+   la otra).
+
+Con esto, la primera vez que escribe se distingue en dos niveles: **persona nueva** (no hay
+persona enlazada) e **identidad nueva de una persona conocida** (ya nos ha escrito por otro
+sitio y hay contexto que cargar).
+
+> **Riesgo del enlace por `username`:** Instagram permite cambiar el nombre de usuario, y un
+> nombre liberado lo puede coger otra persona. En ese caso se enlazaría a alguien con el
+> historial de otra persona. Por eso el dashboard tiene que permitir separar una identidad de
+> una persona (ver decisiones abiertas).
 
 ### 6.3 `conversations` — un hilo de mensajes
 
@@ -165,7 +215,7 @@ reprocesarse (por ejemplo, tras un error).
 |---|---|---|
 | `id` | INTEGER PK | Identificador interno. |
 | `message_id` | FK → `messages` | Mensaje entrante que se procesó. |
-| `gateway_result` | TEXT + CHECK | Resultado del gateway: `accepted`, `blocked_injection`, `rate_limited`, `timeout` o `error`. El diagrama asigna al gateway evitar *prompt injection* y gestionar *timeouts* y *rate limits*. Este campo permite medir con qué frecuencia ocurre cada caso. |
+| `gateway_result` | TEXT + CHECK | Resultado del gateway: `accepted`, `blocked_contact` (la persona tiene un bloqueo activo en `blocks`; no se le contesta), `blocked_injection`, `rate_limited`, `timeout` o `error`. El diagrama asigna al gateway evitar *prompt injection* y gestionar *timeouts* y *rate limits*. Este campo permite medir con qué frecuencia ocurre cada caso. |
 | `intent` | TEXT + CHECK, opcional | Clasificación de la entrada según el diagrama: `faq`, `request` (petición) u `out_of_faq` (fuera de FAQ). Es opcional porque si el gateway bloquea el mensaje, no llega a clasificarse. |
 | `action` | TEXT + CHECK, opcional | Salida decidida: `answer` (responder duda), `request` (realizar petición), `deny` (denegar servicio) o `handoff` (consultar a Bárbara). Es la base de la métrica principal: % de mensajes que resuelve el asistente. |
 | `reply_message_id` | FK → `messages`, opcional | Respuesta que se envió como resultado, si la hubo. Une la pregunta con su respuesta para depurar. |
@@ -262,6 +312,48 @@ no una columna en `conversations`: una columna se sobrescribiría y perderíamos
 | `model_call_id` | FK → `model_calls` | Llamada al modelo que generó el resumen. Así el modelo, los tokens, el coste y la latencia quedan registrados en el mismo sitio que el resto de llamadas, sin duplicar esas columnas aquí. |
 | `created_at` | TEXT | Momento en que se generó el resumen, que coincide con el cierre del ticket. |
 
+### 6.11 `blocks` — bloqueos de una persona
+
+Un bloqueo se aplica a la **persona**, no a una identidad ni a una cuenta. Si alguien está
+bloqueado en una de nuestras cuentas de Instagram y escribe a otra (o por otro canal), el
+gateway lo detecta y no le contesta. Por ahora el bloqueo es **solo interno**: el sistema no
+bloquea a nadie en Instagram.
+
+Hay tres orígenes:
+
+| `source` | Quién | Cómo entra |
+|---|---|---|
+| `channel` | El canal | El adaptador detecta que la persona está bloqueada en una de nuestras cuentas de Instagram y lo registra como `active`, indicando en qué cuenta (`channel_account_id`). |
+| `human` | Bárbara | Bloquea desde el dashboard. Entra directamente como `active`. |
+| `router` | El enrutador | **No bloquea: lo propone** (`proposed`) con un motivo obligatorio. Bárbara lo confirma (`active`) o lo rechaza (`rejected`). Así un error del modelo no deja a un cliente sin respuesta. |
+
+Ciclo de vida (`status`):
+
+```
+router:          proposed ──> active ──> lifted
+                     └──────> rejected
+channel / human: active ──> lifted
+```
+
+El gateway solo mira si la persona tiene alguna fila con `status = 'active'`. Una propuesta
+del enrutador **no** bloquea hasta que Bárbara la confirma.
+
+| Campo | Tipo | Por qué existe |
+|---|---|---|
+| `id` | INTEGER PK | Identificador interno. |
+| `person_id` | FK → `people` | Persona bloqueada. |
+| `source` | TEXT + CHECK | `channel`, `human` o `router` (ver tabla anterior). Permite saber quién bloqueó y medir cuánto propone el enrutador. |
+| `status` | TEXT + CHECK | `proposed`, `active`, `rejected` o `lifted`. Un `CHECK` impide que algo que no sea el enrutador cree propuestas. |
+| `channel_account_id` | FK → `channel_accounts`, opcional | Cuenta en la que se detectó el bloqueo. Obligatoria si `source = 'channel'` (lo garantiza un `CHECK`). Sirve para saber, por ejemplo, que está bloqueado en la cuenta A aunque escriba a la B. |
+| `run_id` | FK → `processing_runs`, opcional | Procesamiento en el que el enrutador propuso el bloqueo. Obligatorio si `source = 'router'`, para que Bárbara vea qué mensaje lo provocó antes de decidir. |
+| `reason` | TEXT, opcional | Por qué se bloquea. Obligatorio si `source = 'router'`. |
+| `created_at` | TEXT | Cuándo se creó el bloqueo o la propuesta. |
+| `decided_at` | TEXT, opcional | Cuándo Bárbara confirmó o rechazó una propuesta del enrutador. `decided_at − created_at` = cuánto tarda en revisarlas. |
+| `lifted_at` | TEXT, opcional | Cuándo se quitó el bloqueo. Obligatorio si `status = 'lifted'`. Si se desbloquea en Instagram, el adaptador lo rellena para los bloqueos `channel` de esa cuenta. |
+
+No se borran filas: desbloquear es pasar a `lifted`, así queda el histórico de quién bloqueó,
+por qué y cuándo.
+
 ## 7. Índices
 
 | Índice | Para qué consulta |
@@ -272,6 +364,10 @@ no una columna en `conversations`: una columna se sobrescribiría y perderíamos
 | `processing_runs(message_id)` | Ir de un mensaje a cómo se procesó. |
 | `model_calls(run_id)` | Ir de un procesamiento a sus llamadas y su coste. |
 | `conversation_summaries(conversation_id, created_at)` | Ver los resúmenes de un ticket en orden. |
+| `contacts(person_id)` | Ir de una persona a todas sus identidades (y de ahí a sus conversaciones). |
+| `contacts(channel, username)` | Enlazar una identidad nueva con la persona que ya tiene ese nombre de usuario. |
+| `blocks(person_id) WHERE status = 'active'` | La comprobación del gateway en cada mensaje: ¿tiene esta persona un bloqueo activo? Índice parcial: solo contiene los bloqueos activos. |
+| `blocks(created_at) WHERE status = 'proposed'` | Bandeja de Bárbara con las propuestas de bloqueo del enrutador pendientes. |
 
 No se añaden más índices hasta que una consulta real lo necesite: cada índice ralentiza las escrituras.
 
@@ -297,13 +393,20 @@ CREATE TABLE channel_accounts (
   UNIQUE (channel, external_id)
 ) STRICT;
 
-CREATE TABLE contacts (
+CREATE TABLE people (
   id            INTEGER PRIMARY KEY,
-  channel       TEXT NOT NULL,
-  external_id   TEXT NOT NULL,
   display_name  TEXT,
   is_customer   INTEGER CHECK (is_customer IN (0, 1)),
-  is_blocked    INTEGER NOT NULL DEFAULT 0 CHECK (is_blocked IN (0, 1)),
+  created_at    TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE contacts (
+  id            INTEGER PRIMARY KEY,
+  person_id     INTEGER NOT NULL REFERENCES people(id),
+  channel       TEXT NOT NULL,
+  external_id   TEXT NOT NULL,
+  username      TEXT CHECK (username = lower(username)),
+  display_name  TEXT,
   created_at    TEXT NOT NULL,
   UNIQUE (channel, external_id)
 ) STRICT;
@@ -350,7 +453,8 @@ CREATE TABLE processing_runs (
   id                INTEGER PRIMARY KEY,
   message_id        INTEGER NOT NULL REFERENCES messages(id),
   gateway_result    TEXT NOT NULL
-                    CHECK (gateway_result IN ('accepted', 'blocked_injection', 'rate_limited', 'timeout', 'error')),
+                    CHECK (gateway_result IN ('accepted', 'blocked_contact', 'blocked_injection',
+                                              'rate_limited', 'timeout', 'error')),
   intent            TEXT CHECK (intent IN ('faq', 'request', 'out_of_faq')),
   action            TEXT CHECK (action IN ('answer', 'request', 'deny', 'handoff')),
   reply_message_id  INTEGER REFERENCES messages(id),
@@ -407,12 +511,34 @@ CREATE TABLE handoffs (
   closed_at          TEXT
 ) STRICT;
 
+CREATE TABLE blocks (
+  id                  INTEGER PRIMARY KEY,
+  person_id           INTEGER NOT NULL REFERENCES people(id),
+  source              TEXT NOT NULL CHECK (source IN ('channel', 'human', 'router')),
+  status              TEXT NOT NULL
+                      CHECK (status IN ('proposed', 'active', 'rejected', 'lifted')),
+  channel_account_id  INTEGER REFERENCES channel_accounts(id),
+  run_id              INTEGER REFERENCES processing_runs(id),
+  reason              TEXT,
+  created_at          TEXT NOT NULL,
+  decided_at          TEXT,
+  lifted_at           TEXT,
+  CHECK (source <> 'channel' OR channel_account_id IS NOT NULL),
+  CHECK (source <> 'router' OR (run_id IS NOT NULL AND reason IS NOT NULL)),
+  CHECK (status NOT IN ('proposed', 'rejected') OR source = 'router'),
+  CHECK (status <> 'lifted' OR lifted_at IS NOT NULL)
+) STRICT;
+
 CREATE INDEX idx_messages_conv       ON messages(conversation_id, created_at);
 CREATE INDEX idx_conversations_inbox ON conversations(status, last_message_at);
 CREATE INDEX idx_handoffs_status     ON handoffs(status, created_at);
 CREATE INDEX idx_runs_message        ON processing_runs(message_id);
 CREATE INDEX idx_model_calls_run     ON model_calls(run_id);
 CREATE INDEX idx_summaries_conv      ON conversation_summaries(conversation_id, created_at);
+CREATE INDEX idx_contacts_person     ON contacts(person_id);
+CREATE INDEX idx_contacts_username   ON contacts(channel, username);
+CREATE INDEX idx_blocks_active       ON blocks(person_id) WHERE status = 'active';
+CREATE INDEX idx_blocks_proposed     ON blocks(created_at) WHERE status = 'proposed';
 ```
 
 ## 10. Métricas del MVP que salen directamente del esquema
@@ -426,15 +552,19 @@ CREATE INDEX idx_summaries_conv      ON conversation_summaries(conversation_id, 
 | Tiempo de respuesta de Bárbara | `handoffs.answered_at − created_at` |
 | Intentos de *prompt injection* bloqueados | `processing_runs` con `gateway_result = 'blocked_injection'` |
 | Conocimiento pendiente de añadir a las FAQ | `handoffs` con `kb_decision = 'add'` |
+| Mensajes de personas bloqueadas que no se contestaron | `processing_runs` con `gateway_result = 'blocked_contact'` |
+| Propuestas de bloqueo del enrutador y cuántas confirma Bárbara | `blocks` con `source = 'router'`, agrupado por `status` |
+| Personas que escriben por más de un canal o cuenta | `contacts` agrupado por `person_id`, o `conversations` con distinto `channel_account_id` por persona |
 
 ## 11. Versión mínima para el primer sprint
 
 Si se quiere empezar con menos tablas:
 
-- **Imprescindibles:** `contacts`, `conversations`, `messages`, `processing_runs`,
-  `model_calls`, `handoffs`, `faq_retrievals`, `conversation_summaries`.
-- **Aplazables:** `channel_accounts` (mientras solo haya una cuenta). Se añade más adelante
-  con una migración.
+- **Imprescindibles:** `people`, `contacts`, `blocks`, `channel_accounts`, `conversations`,
+  `messages`, `processing_runs`, `model_calls`, `handoffs`, `faq_retrievals`,
+  `conversation_summaries`. `channel_accounts` ya no es aplazable: trabajamos con varias
+  cuentas, cada conversación se responde desde la suya y los bloqueos de Instagram indican
+  en qué cuenta se detectaron.
 - **Opcional / pendiente de revisión:** `users`. No está decidido si será necesaria (ver 6.8).
 
 `faq_retrievals` se mantiene desde el principio porque es la evidencia de que cada respuesta
@@ -452,6 +582,10 @@ se basa en una FAQ.
     `python shared/db/init_db.py`, solo usa la librería estándar de Python y se puede
     ejecutar varias veces sin problema: guarda la versión del esquema en
     `PRAGMA user_version` y solo lo aplica una vez.
+  - **Versión actual del esquema: 2** (añade `people` y `blocks`, enlaza `contacts` con
+    `people` y añade `blocked_contact` a `processing_runs.gateway_result`). No hay migración
+    desde la versión 1 porque todavía no hay datos reales: si tienes una base de datos local
+    de la versión 1, el script avisa; bórrala y vuelve a crearla.
 - **El archivo `.db` contiene conversaciones reales de clientes.** Nunca va a git:
   `.gitignore` excluye `storage/` y los archivos `*.db`, `*.db-wal` y `*.db-shm`. Tampoco
   puede ir en `data/faqs/`.
@@ -480,10 +614,19 @@ se basa en una FAQ.
 4. ~~**Ubicación en el repositorio**~~ **✅ Decidido (2026-11-11):** base de datos en
    `storage/apuntalo-marketing-platform.db` y código en `shared/db/`. Ver sección 12.
    Ya está reflejado en `AGENTS.md`.
-5. **Clasificación cliente / no cliente:** cómo se rellena `contacts.is_customer` (¿se
+5. **Clasificación cliente / no cliente:** cómo se rellena `people.is_customer` (¿se
    pregunta, se cruza con otra fuente, lo marca Bárbara?).
-6. **Bloqueos por cuenta:** `contacts.is_blocked` indica si el contacto está bloqueado por
-   *alguna* de nuestras cuentas, pero no por cuál. Si hace falta saberlo (por ejemplo, si
-   está bloqueado en una cuenta y no en otra), habría que añadir una tabla intermedia
-   contacto–cuenta. También hay que decidir quién lo marca: el adaptador del canal
-   automáticamente o una persona desde el dashboard.
+6. ~~**Bloqueos por cuenta**~~ **✅ Decidido (2026-11-16):** el bloqueo es de la persona y
+   vale para todos los canales y cuentas (tabla `blocks`, 6.11). Lo pueden crear el canal
+   (bloqueo detectado en Instagram), Bárbara o el enrutador; el del enrutador es solo una
+   propuesta hasta que Bárbara la confirma. De momento es solo interno: no se bloquea a nadie
+   en Instagram.
+7. **Separar identidades enlazadas por error:** el enlace automático por `username` puede
+   equivocarse si alguien coge un nombre de usuario que antes era de otra persona. El
+   dashboard necesitará una acción para separar una identidad en una persona nueva (y
+   decidir qué pasa con sus bloqueos).
+8. **Cómo detecta el adaptador los bloqueos de Instagram:** falta comprobar si instagram-cli
+   permite consultar la lista de bloqueados de cada cuenta y cada cuánto sincronizarla.
+9. **Quién decide una propuesta de bloqueo:** si se crea la tabla `users`, se puede añadir a
+   `blocks` quién confirmó, rechazó o quitó cada bloqueo. Mientras solo esté Bárbara, no hace
+   falta.

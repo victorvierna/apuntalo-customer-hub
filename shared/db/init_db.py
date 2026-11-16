@@ -19,7 +19,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB_PATH = REPO_ROOT / "storage" / "apuntalo-marketing-platform.db"
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # STRICT tables require SQLite 3.37 or newer.
 MIN_SQLITE_VERSION = (3, 37, 0)
@@ -34,13 +34,20 @@ CREATE TABLE channel_accounts (
   UNIQUE (channel, external_id)
 ) STRICT;
 
-CREATE TABLE contacts (
+CREATE TABLE people (
   id            INTEGER PRIMARY KEY,
-  channel       TEXT NOT NULL,
-  external_id   TEXT NOT NULL,
   display_name  TEXT,
   is_customer   INTEGER CHECK (is_customer IN (0, 1)),
-  is_blocked    INTEGER NOT NULL DEFAULT 0 CHECK (is_blocked IN (0, 1)),
+  created_at    TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE contacts (
+  id            INTEGER PRIMARY KEY,
+  person_id     INTEGER NOT NULL REFERENCES people(id),
+  channel       TEXT NOT NULL,
+  external_id   TEXT NOT NULL,
+  username      TEXT CHECK (username = lower(username)),
+  display_name  TEXT,
   created_at    TEXT NOT NULL,
   UNIQUE (channel, external_id)
 ) STRICT;
@@ -87,7 +94,8 @@ CREATE TABLE processing_runs (
   id                INTEGER PRIMARY KEY,
   message_id        INTEGER NOT NULL REFERENCES messages(id),
   gateway_result    TEXT NOT NULL
-                    CHECK (gateway_result IN ('accepted', 'blocked_injection', 'rate_limited', 'timeout', 'error')),
+                    CHECK (gateway_result IN ('accepted', 'blocked_contact', 'blocked_injection',
+                                              'rate_limited', 'timeout', 'error')),
   intent            TEXT CHECK (intent IN ('faq', 'request', 'out_of_faq')),
   action            TEXT CHECK (action IN ('answer', 'request', 'deny', 'handoff')),
   reply_message_id  INTEGER REFERENCES messages(id),
@@ -144,12 +152,34 @@ CREATE TABLE handoffs (
   closed_at          TEXT
 ) STRICT;
 
+CREATE TABLE blocks (
+  id                  INTEGER PRIMARY KEY,
+  person_id           INTEGER NOT NULL REFERENCES people(id),
+  source              TEXT NOT NULL CHECK (source IN ('channel', 'human', 'router')),
+  status              TEXT NOT NULL
+                      CHECK (status IN ('proposed', 'active', 'rejected', 'lifted')),
+  channel_account_id  INTEGER REFERENCES channel_accounts(id),
+  run_id              INTEGER REFERENCES processing_runs(id),
+  reason              TEXT,
+  created_at          TEXT NOT NULL,
+  decided_at          TEXT,
+  lifted_at           TEXT,
+  CHECK (source <> 'channel' OR channel_account_id IS NOT NULL),
+  CHECK (source <> 'router' OR (run_id IS NOT NULL AND reason IS NOT NULL)),
+  CHECK (status NOT IN ('proposed', 'rejected') OR source = 'router'),
+  CHECK (status <> 'lifted' OR lifted_at IS NOT NULL)
+) STRICT;
+
 CREATE INDEX idx_messages_conv       ON messages(conversation_id, created_at);
 CREATE INDEX idx_conversations_inbox ON conversations(status, last_message_at);
 CREATE INDEX idx_handoffs_status     ON handoffs(status, created_at);
 CREATE INDEX idx_runs_message        ON processing_runs(message_id);
 CREATE INDEX idx_model_calls_run     ON model_calls(run_id);
 CREATE INDEX idx_summaries_conv      ON conversation_summaries(conversation_id, created_at);
+CREATE INDEX idx_contacts_person     ON contacts(person_id);
+CREATE INDEX idx_contacts_username   ON contacts(channel, username);
+CREATE INDEX idx_blocks_active       ON blocks(person_id) WHERE status = 'active';
+CREATE INDEX idx_blocks_proposed     ON blocks(created_at) WHERE status = 'proposed';
 """
 
 
@@ -183,9 +213,13 @@ def init_db(db_path: Path) -> None:
             print(f"Database already at schema version {current}: {db_path}")
             return
         if current != 0:
+            # There are no migrations yet: older versions only exist in local
+            # test databases without real data, which can be recreated.
             raise RuntimeError(
                 f"Unexpected schema version {current} in {db_path} "
-                f"(this script creates version {SCHEMA_VERSION})."
+                f"(this script creates version {SCHEMA_VERSION}). "
+                "If it is a local database without real data, delete it and run "
+                "this script again."
             )
 
         # All or nothing: if any statement fails, no table is created.
