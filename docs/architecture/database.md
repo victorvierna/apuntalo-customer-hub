@@ -79,6 +79,7 @@ people ──< blocks (bloqueos de la persona, en cualquier canal o cuenta)
                     │
 channel_accounts ─┐ │
                   ├─┴──< conversations ──< messages
+                  │             │                ├── inbound_queue (cola: mensajes entrantes nuevos por procesar)
                   │             │                │ (cada mensaje entrante; varios si llegan en ráfaga)
                   │             │                └──< run_messages >── processing_runs ──< model_calls
                   │             │                                             ├──< routing_decisions (una por fase)
@@ -197,7 +198,7 @@ aunque el adaptador la lea muchas veces.
 | `body` | TEXT, opcional | Texto del mensaje. Obligatorio si `content_type = 'text'` (lo garantiza un `CHECK`). En `reaction` es el emoji. En `unsupported` guarda la descripción que da el canal (p. ej. `[Unsupported Type: xma_media_share]`) para que Bárbara sepa qué tipo de mensaje era. Falta en `image`, `video` y `audio`. |
 | `media_path` | TEXT, opcional | Ruta del archivo descargado, relativa a `storage/` (p. ej. `media/<id>.jpg`). Contiene datos de clientes: nunca va a git. |
 | `external_id` | TEXT, opcional | Id del mensaje en el canal. Sirve para detectar duplicados y para referenciarlo al responder. Es opcional porque un mensaje saliente no lo tiene hasta que el canal confirma el envío. |
-| `delivery_status` | TEXT, opcional | Para salientes: `sent` / `failed`. Si el canal rechaza el envío, el dashboard puede avisar y permitir reintentar. |
+| `delivery_status` | TEXT, opcional | Para salientes: `pending` / `sent` / `failed`. Es la **bandeja de salida**: el gateway guarda la respuesta como `pending` y el adaptador envía las pendientes y las marca `sent` o `failed`. Si el canal rechaza el envío, el dashboard puede avisar y permitir reintentar. |
 | `created_at` | TEXT | Orden cronológico del hilo. En los mensajes del canal es la fecha que da el canal (`timestamp`), no la hora a la que los guardamos; así el orden es correcto aunque el adaptador los lea con retraso. |
 
 `UNIQUE (conversation_id, external_id)`: **idempotencia**. El adaptador de Instagram lee las
@@ -389,7 +390,7 @@ por qué y cuándo.
 
 En Instagram es habitual escribir una consulta en varios mensajes seguidos. Si cada uno se
 procesara por separado, el asistente contestaría varias veces a medias. El gateway agrupa los
-mensajes que llegan seguidos (ventana pendiente de fijar, decisión abierta 12) y crea **un**
+mensajes de una conversación que esperan en la cola (`inbound_queue`, 6.14) y crea **un**
 procesamiento para todos. Esta tabla une el procesamiento con sus mensajes.
 
 | Campo | Tipo | Por qué existe |
@@ -445,6 +446,72 @@ recalcular qué fase habría decidido.
 
 Como el resto del logging, **solo recibe inserciones**.
 
+### 6.14 `inbound_queue` — cola entre el adaptador y el gateway
+
+Es la lista de **mensajes entrantes por procesar**. El adaptador del canal (productor) apunta
+cada mensaje entrante nuevo y el gateway (consumidor) va cogiendo lo que está listo. Así no
+necesitan conocerse: solo comparten la cola.
+
+```
+adaptador ──apunta──> inbound_queue ──coge──> gateway ──> enrutador ──> ...
+```
+
+Ciclo de vida de cada fila:
+
+```
+pending ──(el gateway la coge)──> processing ──> done
+   ^                                  │
+   └──(colgada más de 5 min)──────────┴──(3 intentos)──> failed
+```
+
+Funcionamiento del gateway, en bucle cada 1–2 s:
+
+1. **Rescatar las filas colgadas:** las que llevan más de 5 min en `processing` (el proceso se
+   cayó a medias) vuelven a `pending` con `attempts + 1`. Con 3 intentos pasan a `failed` para
+   que las revise una persona.
+2. **Buscar conversaciones listas:** las que tienen filas `pending` y llevan unos segundos sin
+   mensajes nuevos (ventana de la ráfaga, propuesta inicial 8 s, decisión abierta 12).
+3. **Procesarlas:** marca sus filas `processing`, crea **un** procesamiento con todos esos
+   mensajes (`run_messages`) y, al terminar, las marca `done` con su `run_id`.
+
+Ejemplo: Ana escribe "hola" (10:00:00), "una duda" (10:00:03) y "¿cuánto cuesta el curso?"
+(10:00:05). A las 10:00:08 el gateway ve que el último mensaje tiene 3 s y espera. A las
+10:00:13 han pasado 8 s de silencio: coge los tres, crea un solo procesamiento y responde una
+sola vez.
+
+**Todos** los mensajes entrantes nuevos pasan por la cola, incluidas las reacciones o los de
+una conversación en `waiting_human`. El gateway decide qué hacer con cada uno
+(`gateway_result`), así cada mensaje tiene su procesamiento y las métricas cuentan todo el
+tráfico.
+
+**El historial no se encola.** En la primera sincronización el adaptador guarda en `messages`
+las conversaciones antiguas, pero no las apunta en la cola. Como el gateway solo procesa lo que
+está en la cola, nunca contesta mensajes viejos. Esta es la razón principal para tener una
+cola explícita en vez de calcular lo pendiente como "mensaje entrante sin procesamiento".
+
+| Campo | Tipo | Por qué existe |
+|---|---|---|
+| `id` | INTEGER PK | Identificador interno. |
+| `message_id` | FK → `messages`, UNIQUE | Mensaje que hay que procesar. `UNIQUE`: un mensaje entra en la cola una sola vez, aunque el adaptador lo lea varias veces. |
+| `conversation_id` | FK → `conversations` | Conversación del mensaje. Es redundante con `messages`, a propósito: el gateway agrupa la cola por conversación en cada vuelta, sin tener que cruzarla con `messages`. |
+| `status` | TEXT + CHECK | `pending`, `processing`, `done` o `failed` (ver ciclo de vida). |
+| `attempts` | INTEGER, por defecto `0` | Veces que se ha rescatado tras quedarse colgada. Evita reintentar sin fin. |
+| `run_id` | FK → `processing_runs`, opcional | Procesamiento que atendió el mensaje. Obligatorio en `done`. |
+| `error` | TEXT, opcional | Último error, para depurar las filas `failed`. |
+| `enqueued_at` | TEXT | Cuándo se apuntó, **con nuestro reloj**. Se usa para la ventana de la ráfaga porque es fiable; la fecha del canal (`messages.created_at`) puede llegar con retraso. |
+| `started_at` | TEXT, opcional | Cuándo la cogió el gateway. Obligatorio salvo en `pending`. Sirve para detectar filas colgadas. |
+| `finished_at` | TEXT, opcional | Cuándo terminó. Obligatorio en `done` y `failed`. |
+
+**Diferencia con `run_messages`:** la cola es **lo que hay que hacer** (operativa: las filas
+`done` antiguas se pueden limpiar, decisión abierta 13). `run_messages` es **lo que se hizo**
+(histórico para las métricas, no se borra). Además, si un mensaje se reprocesa, la cola solo
+guarda el último `run_id` y `run_messages` guarda todos.
+
+La salida no necesita otra cola: es `messages.delivery_status = 'pending'` (ver 6.4).
+
+Limitación conocida: la BD no puede comprobar con un `CHECK` que el mensaje encolado sea
+entrante (`direction = 'in'`), porque está en otra tabla. Lo garantiza el adaptador.
+
 ## 7. Índices
 
 | Índice | Para qué consulta |
@@ -454,6 +521,9 @@ Como el resto del logging, **solo recibe inserciones**.
 | `handoffs(status, created_at)` | Derivaciones pendientes, de la más antigua a la más reciente. |
 | `run_messages(message_id)` | Ir de un mensaje a cómo se procesó. Ir de un procesamiento a sus mensajes ya lo cubre la clave primaria `(run_id, message_id)`. |
 | `routing_decisions(run_id, phase)` | Ir de un procesamiento a las fases del enrutador. Lo crea automáticamente el `UNIQUE (run_id, phase)`. |
+| `inbound_queue(conversation_id, enqueued_at) WHERE status = 'pending'` | La consulta del gateway en cada vuelta: qué conversaciones tienen mensajes pendientes y cuándo llegó el último. Índice parcial: solo contiene lo pendiente, así sigue siendo pequeño aunque la cola acumule filas `done`. |
+| `inbound_queue(started_at) WHERE status = 'processing'` | Rescatar las filas colgadas. |
+| `messages(created_at) WHERE delivery_status = 'pending'` | Bandeja de salida: qué respuestas tiene que enviar el adaptador. |
 | `model_calls(run_id)` | Ir de un procesamiento a sus llamadas y su coste. |
 | `conversation_summaries(conversation_id, created_at)` | Ver los resúmenes de un ticket en orden. |
 | `contacts(person_id)` | Ir de una persona a todas sus identidades (y de ahí a sus conversaciones). |
@@ -535,7 +605,7 @@ CREATE TABLE messages (
   body             TEXT,
   media_path       TEXT,
   external_id      TEXT,
-  delivery_status  TEXT CHECK (delivery_status IN ('sent', 'failed')),
+  delivery_status  TEXT CHECK (delivery_status IN ('pending', 'sent', 'failed')),
   created_at       TEXT NOT NULL,
   UNIQUE (conversation_id, external_id),
   CHECK (content_type <> 'text' OR body IS NOT NULL)
@@ -565,6 +635,23 @@ CREATE TABLE processing_runs (
   CHECK (action <> 'answer' OR tier IN ('slm', 'llm')),
   CHECK (action NOT IN ('deny', 'handoff') OR tier = 'none'),
   CHECK (finished_at IS NULL OR outcome IS NOT NULL)
+) STRICT;
+
+CREATE TABLE inbound_queue (
+  id               INTEGER PRIMARY KEY,
+  message_id       INTEGER NOT NULL UNIQUE REFERENCES messages(id),
+  conversation_id  INTEGER NOT NULL REFERENCES conversations(id),
+  status           TEXT NOT NULL DEFAULT 'pending'
+                   CHECK (status IN ('pending', 'processing', 'done', 'failed')),
+  attempts         INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  run_id           INTEGER REFERENCES processing_runs(id),
+  error            TEXT,
+  enqueued_at      TEXT NOT NULL,
+  started_at       TEXT,
+  finished_at      TEXT,
+  CHECK (status = 'pending' OR started_at IS NOT NULL),
+  CHECK (status NOT IN ('done', 'failed') OR finished_at IS NOT NULL),
+  CHECK (status <> 'done' OR run_id IS NOT NULL)
 ) STRICT;
 
 CREATE TABLE run_messages (
@@ -668,6 +755,10 @@ CREATE INDEX idx_messages_conv       ON messages(conversation_id, created_at);
 CREATE INDEX idx_conversations_inbox ON conversations(status, last_message_at);
 CREATE INDEX idx_handoffs_status     ON handoffs(status, created_at);
 CREATE INDEX idx_run_messages_msg    ON run_messages(message_id);
+CREATE INDEX idx_queue_pending       ON inbound_queue(conversation_id, enqueued_at)
+                                     WHERE status = 'pending';
+CREATE INDEX idx_queue_processing    ON inbound_queue(started_at) WHERE status = 'processing';
+CREATE INDEX idx_messages_outbox     ON messages(created_at) WHERE delivery_status = 'pending';
 CREATE INDEX idx_model_calls_run     ON model_calls(run_id);
 CREATE INDEX idx_summaries_conv      ON conversation_summaries(conversation_id, created_at);
 CREATE INDEX idx_contacts_person     ON contacts(person_id);
@@ -687,6 +778,9 @@ CREATE INDEX idx_blocks_proposed     ON blocks(created_at) WHERE status = 'propo
 | Acuerdo entre clasificador y árbitro | Procesamientos con fila `classifier` y `arbiter` en `routing_decisions`, comparando `action` y `tier` |
 | Respuestas bloqueadas por el gateway de salida | `processing_runs.output_result` distinto de `passed` |
 | Uso del *fallback* y *timeouts* | `model_calls` con `is_fallback = 1` o `status = 'timeout'` |
+| Mensajes esperando y atascados | `inbound_queue` agrupada por `status`; `failed` necesita revisión |
+| Tiempo en cola | `inbound_queue.started_at − enqueued_at` (incluye la espera de la ráfaga) |
+| Respuestas sin enviar | `messages` con `delivery_status = 'pending'` antiguas, o `failed` |
 | % de derivaciones y motivo | `handoffs.reason`, agrupado |
 | Coste por día y por modelo | `SUM(model_calls.cost_micros)` agrupado por fecha y `model` |
 | Tiempo de respuesta del bot | `processing_runs.finished_at − started_at` |
@@ -702,7 +796,7 @@ CREATE INDEX idx_blocks_proposed     ON blocks(created_at) WHERE status = 'propo
 Si se quiere empezar con menos tablas:
 
 - **Imprescindibles:** `people`, `contacts`, `blocks`, `channel_accounts`, `conversations`,
-  `messages`, `processing_runs`, `run_messages`, `routing_decisions`, `model_calls`,
+  `messages`, `inbound_queue`, `processing_runs`, `run_messages`, `routing_decisions`, `model_calls`,
   `handoffs`, `faq_retrievals`, `conversation_summaries`. `channel_accounts` ya no es aplazable: trabajamos con varias
   cuentas, cada conversación se responde desde la suya y los bloqueos de Instagram indican
   en qué cuenta se detectaron.
@@ -726,8 +820,9 @@ se basa en una FAQ.
   - **Versión actual del esquema: 3.**
     - La versión 2 añadió `people` y `blocks`, enlazó `contacts` con `people` y añadió
       `blocked_contact` a `processing_runs.gateway_result`.
-    - La versión 3 añade los datos del enrutador: las tablas `run_messages` y
-      `routing_decisions`; en `processing_runs`, los campos `topic`, `complexity`, `tier`,
+    - La versión 3 añade la cola entre el adaptador y el gateway (`inbound_queue`) y la
+      bandeja de salida (`pending` en `messages.delivery_status`), y los datos del enrutador:
+      las tablas `run_messages` y `routing_decisions`; en `processing_runs`, los campos `topic`, `complexity`, `tier`,
       `decided_by`, `output_result` y `outcome`, más valores nuevos en `gateway_result` (sin
       `timeout`) y sin la columna `message_id`; y en `model_calls`, `tier`, `status` e
       `is_fallback`. Requiere SQLite 3.38 o superior (por `json_valid`).
@@ -781,6 +876,9 @@ se basa en una FAQ.
     tanto es texto libre.
 11. **Qué es "realizar petición" (`action = 'request'`):** no está definido qué hace el
     sistema en ese caso. Por eso `request` no tiene `tier` obligatorio.
-12. **Ventana de agrupación de ráfagas:** cuánto espera el gateway sin mensajes nuevos antes
-    de procesar la ráfaga (propuesta inicial: unos 8 s). Es una decisión del código del
-    gateway, no del esquema.
+12. **Tiempos de la cola:** cuánto espera el gateway sin mensajes nuevos antes de procesar la
+    ráfaga (propuesta inicial: 8 s), cuándo se considera colgada una fila (5 min) y cuántos
+    intentos se permiten (3). Son decisiones del código del gateway, no del esquema.
+13. **Limpieza de la cola:** cada cuánto se borran las filas `done` antiguas de
+    `inbound_queue`. El histórico no se pierde, porque está en `run_messages` y
+    `processing_runs`.
