@@ -43,15 +43,73 @@ asigna: *prompt injection*, *rate limits* y *timeouts*.
 
 ## 2. Entrada y salida
 
-### Entrada: un mensaje leído del canal
+### Cómo llegan los mensajes: una cola en la base de datos
 
-El adaptador de Instagram no recibe avisos de mensajes nuevos: alguien tiene que leer las
-conversaciones recientes cada cierto tiempo y pasar cada mensaje al gateway (ver decisiones
-abiertas). Cada mensaje llega con lo necesario para situarlo:
+El adaptador de Instagram no recibe avisos de mensajes nuevos: hay que leer las
+conversaciones recientes cada cierto tiempo. **Decidido (2026-11-16):** el gateway se conecta
+con instagram-cli a través de un script que se ejecuta cada cierto tiempo y de una cola
+guardada en la base de datos:
+
+```
+instagram-cli ──> Lector de Instagram ──encola──> inbound_queue ──lee──> Gateway (worker)
+                  modules/channels/instagram/     (SQLite)               modules/gateway/
+                  (cada N segundos, por cuenta)
+```
+
+- **Lector** (específico de Instagram, así que vive en `modules/channels/instagram/`): cada
+  cierto tiempo, por cada cuenta, llama a `list_conversations()` y `read_messages()` y
+  escribe cada mensaje en la cola, ya traducido a los tipos comunes de `shared/types/`. No
+  decide nada ni toca `contacts`, `conversations` ni `messages`.
+- **Gateway** (independiente del canal): cada cierto tiempo lee de la cola los mensajes
+  pendientes y los pasa por sus comprobaciones (sección 4).
+
+**Por qué una cola y no llamar al gateway directamente:**
+- **Separa los ritmos.** Cada comando de instagram-cli tarda unos 5–6 s. El lector puede ir
+  despacio sin frenar al gateway, y si el gateway falla los mensajes siguen en la cola.
+- **No se pierde nada si algo se cae.** Un mensaje pasa a "hecho" solo cuando el gateway
+  termina. Si el proceso se cae a medias, se vuelve a intentar.
+- **Sirve para cualquier canal.** Otro canal solo necesita su propio lector que escriba en la
+  misma cola.
+- **SQLite basta.** No hace falta instalar un sistema de colas aparte (Redis, RabbitMQ…), y
+  la cola queda en el mismo archivo que el resto de datos, con las mismas copias de seguridad.
+
+Propuesta de tabla (todavía no está en el esquema: se añadirá a `database.md` en la PR del
+código, como versión 3):
+
+```sql
+CREATE TABLE inbound_queue (
+  id                  INTEGER PRIMARY KEY,
+  channel_account_id  INTEGER NOT NULL REFERENCES channel_accounts(id),
+  payload             TEXT NOT NULL,   -- JSON: ChannelConversation + ChannelMessage
+  status              TEXT NOT NULL DEFAULT 'pending'
+                      CHECK (status IN ('pending', 'processing', 'done', 'failed')),
+  attempts            INTEGER NOT NULL DEFAULT 0,
+  error               TEXT,
+  enqueued_at         TEXT NOT NULL,
+  started_at          TEXT,
+  finished_at         TEXT
+) STRICT;
+```
+
+- Para coger trabajo, el gateway marca un lote como `processing` en una sola sentencia
+  (`UPDATE … WHERE status = 'pending' … RETURNING`). Así dos procesos del gateway nunca cogen
+  el mismo mensaje.
+- Un mensaje que lleva demasiado tiempo en `processing` (el proceso se cayó) vuelve a
+  `pending`. Tras varios fallos (`attempts`) pasa a `failed` y el dashboard lo muestra.
+- **El lector encola también mensajes que ya conoce** (vuelve a leer las conversaciones
+  recientes cada vez). No pasa nada: el gateway los descarta en `store_message` (4.4). Para
+  que la cola no crezca sin control, el lector puede guardar hasta qué mensaje leyó en cada
+  conversación y no volver a encolar los anteriores.
+- **Las respuestas** pueden seguir el mismo patrón en sentido contrario (una cola de salida
+  que un script envía con instagram-cli). Se diseñará con el envío de respuestas.
+
+### Entrada del gateway: un mensaje de la cola
+
+Cada elemento de la cola trae lo necesario para situar el mensaje:
 
 | Dato | De dónde sale | Para qué lo usa el gateway |
 |---|---|---|
-| Cuenta propia | `channel_accounts` (la cuenta de instagram-cli que leyó el mensaje) | Saber en qué cuenta entró y desde cuál responder. |
+| Cuenta propia | `inbound_queue.channel_account_id` (la cuenta de instagram-cli que leyó el mensaje) | Saber en qué cuenta entró y desde cuál responder. |
 | `ChannelConversation` | `adapter.list_conversations()` | El `external_id` de la conversación y el **nombre de usuario** del contacto (`participants`). El nombre de usuario que da `read` suele ser genérico (`User_<id>`), así que el bueno es este. |
 | `ChannelMessage` | `adapter.read_messages()` | El mensaje: `external_id`, `sender_external_id` (el `userId` numérico), `direction`, `content_type`, `body`, `created_at`. |
 
@@ -226,7 +284,9 @@ cuenta A que escribe a la cuenta B (o por otro canal) se detecta y no recibe res
 Si está bloqueada:
 - `processing_runs.gateway_result = 'blocked_contact'`, con `finished_at`.
 - No se contesta ni se llama a ningún modelo.
-- El mensaje queda guardado y el dashboard lo muestra marcado como bloqueado.
+- **El mensaje se guarda** (decidido el 2026-11-16), para auditoría y para medir cuántos
+  mensajes de personas bloqueadas llegan. El dashboard lo muestra marcado como bloqueado.
+  Sigue la política de retención (RGPD) de `database.md`, que todavía está pendiente.
 - **El bloqueo es solo interno:** el gateway no bloquea a nadie en Instagram.
 
 ### 6.2 Qué cuenta como bloqueo
@@ -275,30 +335,46 @@ Se confirmará en la PR del código. Todo con la librería estándar (`docs/deci
 
 | Ruta | Qué contiene |
 |---|---|
+| `modules/channels/instagram/poller.py` | El lector: cada cierto tiempo lee cada cuenta con el adaptador y encola los mensajes (sección 2). |
+| `modules/gateway/worker.py` | Lee de la cola los mensajes pendientes y los pasa por el pipeline. |
 | `modules/gateway/pipeline.py` | La lista de comprobaciones y el bucle que las ejecuta. |
 | `modules/gateway/checks.py` | Una función por comprobación (sección 4). |
 | `modules/gateway/tests/` | Un test por comprobación y uno del flujo completo, con una base de datos SQLite temporal. |
 | `shared/types/gateway.py` | `InboundMessage` (cuenta + conversación + mensaje), `GatewayContext`, `GatewayResult` (los mismos valores que el `CHECK` de `gateway_result`) y `GatewayDecision`. En `shared/` porque los usan el gateway, el enrutador y el logging. |
-| `shared/db/` | Acceso a `people`, `contacts`, `blocks`, `conversations` y `messages`. El dashboard también lo usará (bloquear, fusionar personas). |
+| `shared/db/` | Acceso a `people`, `contacts`, `blocks`, `conversations`, `messages` e `inbound_queue`. El dashboard también lo usará (bloquear, fusionar personas, ver mensajes fallidos de la cola). |
 
 Ninguno de estos archivos puede importar nada de `modules/channels/`.
 
 ## 9. Decisiones abiertas
 
-1. **¿Quién llama al gateway?** Hace falta un proceso que, cada cierto tiempo, lea las
-   conversaciones recientes de cada cuenta con el adaptador y pase cada mensaje al gateway.
-   Falta decidir dónde vive (no encaja en ningún módulo actual) y cada cuánto lee: cada
-   comando de instagram-cli tarda unos 5–6 s.
+1. **Cada cuánto se ejecutan el lector y el gateway.** Cada comando de instagram-cli tarda
+   unos 5–6 s y `inbox` devuelve como mucho 10 conversaciones, así que el intervalo del
+   lector marca el tiempo mínimo de respuesta. Falta decidirlo con pruebas reales, y también
+   cómo se arrancan los dos scripts (cron, un proceso que no termina, Docker…).
 2. **Conversaciones que lleva una persona:** `gateway_result` no tiene un valor para "la
    conversación está en `waiting_human`". Propuesta: añadir `human_owned` al `CHECK`
-   (cambio de esquema).
-3. **Mensaje nuevo en una conversación `closed`:** propuesta: se reabre (`status = 'bot'`) y
-   se procesa como cualquier otro.
-4. **Mensajes de personas bloqueadas:** la propuesta es guardarlos (para auditoría y para la
-   métrica de mensajes bloqueados). Si se prefiere no guardar datos de personas bloqueadas,
-   no quedaría registro en `processing_runs`. Tiene que seguir la política de retención
-   (RGPD) de `database.md`.
-5. **Conversaciones de grupo:** si `participants` tiene más de una persona, no está claro a
-   quién atribuir el mensaje. Propuesta: derivarlas siempre a Bárbara.
-6. **Prompt injection, rate limits y timeouts:** están en el C2 pero no se diseñan aquí. Irán
-   como comprobaciones nuevas en la lista (sección 3), después de `apply_content_policy`.
+   (cambio de esquema, junto con `inbound_queue`).
+3. **Cuándo se cierra una conversación (pendiente de definir).** Al cerrarse se genera su
+   resumen (`conversation_summaries`, que ya existe en el esquema) y queda archivada hasta que
+   la persona vuelva a escribir. Falta definir:
+   - qué la cierra: Bárbara a mano, un tiempo sin mensajes, que el asistente dé la consulta
+     por resuelta…;
+   - qué hace el gateway cuando llega un mensaje a una conversación cerrada: reabrirla o
+     empezar una conversación nueva. Hoy solo puede haber una fila por hilo del canal
+     (`UNIQUE (channel_account_id, external_id)`), así que reabrir es lo que encaja con el
+     esquema actual;
+   - en ambos casos, el resumen archivado llega al enrutador como contexto previo (sección 7).
+
+### Decidido
+
+- ~~**¿Quién llama al gateway?**~~ **✅ (2026-11-16):** un lector que se ejecuta cada cierto
+  tiempo y una cola en la base de datos (sección 2).
+- ~~**Mensajes de personas bloqueadas**~~ **✅ (2026-11-16):** se guardan, para auditoría y
+  métricas (sección 6.1).
+- ~~**Conversaciones de grupo**~~ **✅ (2026-11-16):** fuera del MVP. El lector no encola
+  conversaciones con más de un participante, así que nunca llegan al gateway.
+
+### Fuera de este documento
+
+- **Prompt injection, rate limits y timeouts:** están en el C2 pero no se diseñan aquí. Irán
+  como comprobaciones nuevas en la lista (sección 3), después de `apply_content_policy`.
