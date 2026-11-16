@@ -19,7 +19,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB_PATH = REPO_ROOT / "storage" / "apuntalo-marketing-platform.db"
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # STRICT tables require SQLite 3.37 or newer, and json_valid() (used to check
 # routing_decisions.scores) is built in from 3.38.

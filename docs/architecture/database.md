@@ -1,7 +1,7 @@
 # Arquitectura de la base de datos
 
 > **Estado:** propuesta para revisión (borrador)
-> **Fecha:** 2026-11-11 (actualizado el 2026-11-16: personas, identidades y bloqueos; datos del enrutador)
+> **Fecha:** 2026-11-11 (actualizado el 2026-11-16: personas, identidades y bloqueos; datos del enrutador; cola de entrada)
 > **Motor:** SQLite
 > **Alcance:** esquema de datos del núcleo (conversaciones, procesamiento, logging y derivación a Bárbara)
 
@@ -817,15 +817,16 @@ se basa en una FAQ.
     `python shared/db/init_db.py`, solo usa la librería estándar de Python y se puede
     ejecutar varias veces sin problema: guarda la versión del esquema en
     `PRAGMA user_version` y solo lo aplica una vez.
-  - **Versión actual del esquema: 3.**
+  - **Versión actual del esquema: 4.**
     - La versión 2 añadió `people` y `blocks`, enlazó `contacts` con `people` y añadió
       `blocked_contact` a `processing_runs.gateway_result`.
-    - La versión 3 añade la cola entre el adaptador y el gateway (`inbound_queue`) y la
-      bandeja de salida (`pending` en `messages.delivery_status`), y los datos del enrutador:
-      las tablas `run_messages` y `routing_decisions`; en `processing_runs`, los campos `topic`, `complexity`, `tier`,
+    - La versión 3 añadió los datos del enrutador: las tablas `run_messages` y
+      `routing_decisions`; en `processing_runs`, los campos `topic`, `complexity`, `tier`,
       `decided_by`, `output_result` y `outcome`, más valores nuevos en `gateway_result` (sin
       `timeout`) y sin la columna `message_id`; y en `model_calls`, `tier`, `status` e
       `is_fallback`. Requiere SQLite 3.38 o superior (por `json_valid`).
+    - La versión 4 añade la cola entre el adaptador y el gateway (`inbound_queue`) y la
+      bandeja de salida (`pending` en `messages.delivery_status`).
     - No hay migraciones porque todavía no hay datos reales: si tienes una base de datos
       local de una versión anterior, el script avisa; bórrala y vuelve a crearla.
 - **El archivo `.db` contiene conversaciones reales de clientes.** Nunca va a git:
