@@ -1,0 +1,28 @@
+{
+  "ok": true,
+  "data": {
+    "threadId": "340282366841710300000000000000000000001",
+    "messages": [
+      {
+        "id": "30000000000000000000000000000000001",
+        "itemType": "text",
+        "text": "¿Cuánto cuesta el curso?",
+        "userId": "1000000001",
+        "username": "User_1000000001",
+        "timestamp": "2026-11-11T08:14:50.694Z",
+        "isOutgoing": false
+      },
+      {
+        "id": "30000000000000000000000000000000009",
+        "itemType": "text",
+        "text": "Hola, ¿en qué te ayudo?",
+        "userId": "1000000099",
+        "username": "You",
+        "timestamp": "2026-11-11T08:25:00.000Z",
+        "isOutgoing": true
+      }
+    ],
+    "cursor": "30000000000000000000000000000000001",
+    "markedSeen": false
+  }
+}

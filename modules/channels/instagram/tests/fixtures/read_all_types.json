@@ -1,0 +1,81 @@
+{
+  "ok": true,
+  "data": {
+    "threadId": "340282366841710300000000000000000000001",
+    "messages": [
+      {
+        "id": "30000000000000000000000000000000001",
+        "itemType": "text",
+        "text": "¿Cuánto cuesta el curso?",
+        "userId": "1000000001",
+        "username": "User_1000000001",
+        "timestamp": "2026-11-11T08:14:50.694Z",
+        "isOutgoing": false
+      },
+      {
+        "id": "30000000000000000000000000000000002",
+        "itemType": "placeholder",
+        "text": "[Unsupported Type: voice_media]",
+        "userId": "1000000001",
+        "username": "User_1000000001",
+        "timestamp": "2026-11-11T08:17:09.296Z",
+        "isOutgoing": false
+      },
+      {
+        "id": "30000000000000000000000000000000003",
+        "itemType": "placeholder",
+        "text": "[Unsupported Type: xma_media_share]",
+        "userId": "1000000001",
+        "username": "User_1000000001",
+        "timestamp": "2026-11-11T08:19:01.674Z",
+        "isOutgoing": false
+      },
+      {
+        "id": "30000000000000000000000000000000004",
+        "itemType": "placeholder",
+        "text": "[Instagram CLI successfully blocked a brainrot]",
+        "userId": "1000000001",
+        "username": "User_1000000001",
+        "timestamp": "2026-11-11T08:19:35.947Z",
+        "isOutgoing": false
+      },
+      {
+        "id": "30000000000000000000000000000000005",
+        "itemType": "media",
+        "media": { "id": "1000000000000001", "mediaType": 1 },
+        "userId": "1000000001",
+        "username": "User_1000000001",
+        "timestamp": "2026-11-11T08:21:10.288Z",
+        "isOutgoing": false
+      },
+      {
+        "id": "30000000000000000000000000000000006",
+        "itemType": "link",
+        "userId": "1000000001",
+        "username": "User_1000000001",
+        "timestamp": "2026-11-11T08:22:00.000Z",
+        "isOutgoing": false
+      },
+      {
+        "id": "30000000000000000000000000000000007",
+        "itemType": "placeholder",
+        "text": "[Sent a ❤️]",
+        "userId": "1000000001",
+        "username": "User_1000000001",
+        "timestamp": "2026-11-11T08:22:30.000Z",
+        "isOutgoing": false
+      },
+      {
+        "id": "30000000000000000000000000000000008",
+        "itemType": "text",
+        "text": "Hola, te respondemos enseguida",
+        "userId": "1000000099",
+        "username": "You",
+        "timestamp": "2026-11-11T08:23:26.580Z",
+        "isOutgoing": true
+      }
+    ],
+    "cursor": "30000000000000000000000000000000001",
+    "markedSeen": false
+  }
+}

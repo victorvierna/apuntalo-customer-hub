@@ -1,0 +1,31 @@
+{
+  "ok": true,
+  "data": [
+    {
+      "id": "340282366841710300000000000000000000001",
+      "title": "Cliente Prueba",
+      "users": ["cliente.prueba"],
+      "lastMessage": {
+        "id": "30000000000000000000000000000000003",
+        "itemType": "text",
+        "text": "¿Cuánto cuesta el curso?",
+        "timestamp": "2026-11-11T08:21:23.748Z"
+      },
+      "lastActivity": "2026-11-11T08:21:23.748Z",
+      "unread": true
+    },
+    {
+      "id": "340282366841710300000000000000000000002",
+      "title": "Solicitud Aceptada",
+      "users": ["solicitud.aceptada"],
+      "lastMessage": {
+        "id": "30000000000000000000000000000000010",
+        "itemType": "text",
+        "text": "Hola, quería información",
+        "timestamp": "2026-11-11T07:58:26.519Z"
+      },
+      "lastActivity": "2026-11-11T07:58:26.519Z",
+      "unread": false
+    }
+  ]
+}

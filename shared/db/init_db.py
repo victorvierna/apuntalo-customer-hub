@@ -72,7 +72,8 @@ CREATE TABLE messages (
   author           TEXT NOT NULL CHECK (author IN ('contact', 'assistant', 'human')),
   author_user_id   INTEGER REFERENCES users(id),
   content_type     TEXT NOT NULL DEFAULT 'text'
-                   CHECK (content_type IN ('text', 'media', 'unsupported')),
+                   CHECK (content_type IN ('text', 'image', 'video', 'audio',
+                                          'reaction', 'unsupported')),
   body             TEXT,
   media_path       TEXT,
   external_id      TEXT,
