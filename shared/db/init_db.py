@@ -19,10 +19,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB_PATH = REPO_ROOT / "storage" / "apuntalo-marketing-platform.db"
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
-# STRICT tables require SQLite 3.37 or newer.
-MIN_SQLITE_VERSION = (3, 37, 0)
+# STRICT tables require SQLite 3.37 or newer, and json_valid() (used to check
+# routing_decisions.scores) is built in from 3.38.
+MIN_SQLITE_VERSION = (3, 38, 0)
 
 SCHEMA = """
 CREATE TABLE channel_accounts (
@@ -92,16 +93,34 @@ CREATE TABLE messages (
 
 CREATE TABLE processing_runs (
   id                INTEGER PRIMARY KEY,
-  message_id        INTEGER NOT NULL REFERENCES messages(id),
   gateway_result    TEXT NOT NULL
-                    CHECK (gateway_result IN ('accepted', 'blocked_contact', 'blocked_injection',
-                                              'rate_limited', 'timeout', 'error')),
+                    CHECK (gateway_result IN ('accepted', 'store_only', 'unsupported_content',
+                                              'human_owned', 'blocked_contact',
+                                              'blocked_injection', 'rate_limited', 'error')),
   intent            TEXT CHECK (intent IN ('faq', 'request', 'out_of_faq')),
+  topic             TEXT,
+  complexity        REAL CHECK (complexity BETWEEN 0 AND 1),
   action            TEXT CHECK (action IN ('answer', 'request', 'deny', 'handoff')),
+  tier              TEXT CHECK (tier IN ('slm', 'llm', 'none')),
+  decided_by        TEXT CHECK (decided_by IN ('rule', 'classifier', 'arbiter')),
+  output_result     TEXT CHECK (output_result IN ('passed', 'no_grounding', 'rejected')),
+  outcome           TEXT CHECK (outcome IN ('replied', 'denied', 'handed_off',
+                                            'stored_only', 'failed')),
   reply_message_id  INTEGER REFERENCES messages(id),
   error             TEXT,
   started_at        TEXT NOT NULL,
-  finished_at       TEXT
+  finished_at       TEXT,
+  CHECK (gateway_result = 'accepted' OR action IS NULL),
+  CHECK (action IS NULL OR (tier IS NOT NULL AND decided_by IS NOT NULL)),
+  CHECK (action <> 'answer' OR tier IN ('slm', 'llm')),
+  CHECK (action NOT IN ('deny', 'handoff') OR tier = 'none'),
+  CHECK (finished_at IS NULL OR outcome IS NOT NULL)
+) STRICT;
+
+CREATE TABLE run_messages (
+  run_id      INTEGER NOT NULL REFERENCES processing_runs(id),
+  message_id  INTEGER NOT NULL REFERENCES messages(id),
+  PRIMARY KEY (run_id, message_id)
 ) STRICT;
 
 CREATE TABLE model_calls (
@@ -110,12 +129,37 @@ CREATE TABLE model_calls (
   purpose        TEXT NOT NULL CHECK (purpose IN ('routing', 'answer', 'summary')),
   provider       TEXT NOT NULL,
   model          TEXT NOT NULL,
+  tier           TEXT NOT NULL CHECK (tier IN ('slm', 'llm')),
+  status         TEXT NOT NULL DEFAULT 'ok' CHECK (status IN ('ok', 'timeout', 'error')),
+  is_fallback    INTEGER NOT NULL DEFAULT 0 CHECK (is_fallback IN (0, 1)),
   input_tokens   INTEGER,
   output_tokens  INTEGER,
   cost_micros    INTEGER,
   latency_ms     INTEGER,
   created_at     TEXT NOT NULL,
   CHECK (run_id IS NOT NULL OR purpose = 'summary')
+) STRICT;
+
+CREATE TABLE routing_decisions (
+  id              INTEGER PRIMARY KEY,
+  run_id          INTEGER NOT NULL REFERENCES processing_runs(id),
+  phase           TEXT NOT NULL CHECK (phase IN ('rule', 'classifier', 'arbiter')),
+  intent          TEXT CHECK (intent IN ('faq', 'request', 'out_of_faq')),
+  topic           TEXT,
+  complexity      REAL CHECK (complexity BETWEEN 0 AND 1),
+  action          TEXT NOT NULL CHECK (action IN ('answer', 'request', 'deny', 'handoff')),
+  tier            TEXT NOT NULL CHECK (tier IN ('slm', 'llm', 'none')),
+  confidence      REAL CHECK (confidence BETWEEN 0 AND 1),
+  threshold       REAL CHECK (threshold BETWEEN 0 AND 1),
+  scores          TEXT CHECK (scores IS NULL OR json_valid(scores)),
+  router_version  TEXT NOT NULL,
+  latency_ms      INTEGER NOT NULL,
+  model_call_id   INTEGER REFERENCES model_calls(id),
+  created_at      TEXT NOT NULL,
+  UNIQUE (run_id, phase),
+  CHECK (phase <> 'classifier'
+         OR (confidence IS NOT NULL AND threshold IS NOT NULL AND scores IS NOT NULL)),
+  CHECK (phase <> 'arbiter' OR model_call_id IS NOT NULL)
 ) STRICT;
 
 CREATE TABLE conversation_summaries (
@@ -173,7 +217,7 @@ CREATE TABLE blocks (
 CREATE INDEX idx_messages_conv       ON messages(conversation_id, created_at);
 CREATE INDEX idx_conversations_inbox ON conversations(status, last_message_at);
 CREATE INDEX idx_handoffs_status     ON handoffs(status, created_at);
-CREATE INDEX idx_runs_message        ON processing_runs(message_id);
+CREATE INDEX idx_run_messages_msg    ON run_messages(message_id);
 CREATE INDEX idx_model_calls_run     ON model_calls(run_id);
 CREATE INDEX idx_summaries_conv      ON conversation_summaries(conversation_id, created_at);
 CREATE INDEX idx_contacts_person     ON contacts(person_id);
