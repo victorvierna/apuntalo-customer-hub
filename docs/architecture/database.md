@@ -904,5 +904,9 @@ se basa en una FAQ.
     `processing_runs`. Ojo: si se borra la fila de un mensaje que el lector todavía relee, se
     volverá a encolar. No pasa nada, porque el gateway lo descarta como duplicado al guardarlo,
     pero conviene borrar solo filas de mensajes que ya no aparecen en las lecturas.
-14. **Cómo detecta el lector el historial (`is_backfill`):** por ejemplo, todo lo que lee la
-    primera vez que sincroniza una cuenta, o lo anterior a una fecha de corte por cuenta.
+14. ~~**Cómo detecta el lector el historial (`is_backfill`)**~~ **✅ Decidido (2026-11-17):**
+    el historial se guarda entero (es el contexto de cada cliente), solo no se contesta. Es
+    historial todo lo que se lee en la primera pasada de una cuenta y, en una conversación que
+    el lector no había visto nunca, lo anterior a nuestra última respuesta (ya estaba
+    contestado). Una solicitud de mensaje aceptada no tiene respuestas nuestras, así que se
+    contesta. Sin cambios en el esquema: ver `modules/channels/instagram/poller.py`.

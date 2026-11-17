@@ -23,6 +23,7 @@ tipo de mensaje: solo dice qué es (`content_type`). La regla está en
 | `cli.py` | `InstagramCli`: ejecuta instagram-cli (sin shell) y devuelve el `data` de su JSON. |
 | `mapper.py` | Traduce el JSON a los tipos comunes. Funciones puras, sin red. |
 | `errors.py` | Errores del adaptador (todos heredan de `InstagramCliError`). |
+| `poller.py` | El lector: lee la bandeja de una cuenta y encola los mensajes en `inbound_queue` (ver "Lector"). |
 | `send_patch.py` | Comprueba al arrancar que nuestro parche está aplicado y avisa si no. |
 | `install.sh` | Instala instagram-cli con todos los parches (ver "Instalación"). |
 | `patches/` | Parche propio para instagram-cli que evita que se pierdan mensajes (ver "Mensajes perdidos"). |
@@ -213,6 +214,42 @@ Code. La sesión se guarda en `~/.instagram-cli/users/` y el adaptador la reutil
   ([#274](https://github.com/supreme-gg-gg/instagram-cli/issues/274)). El comando `send` que
   usa el adaptador no lo hace (comprobado en el código de la 2.1.0); hay que volver a
   comprobarlo al actualizar instagram-cli.
+
+## Lector (`poller.py`)
+
+Llena la cola de entrada que procesa el gateway (`docs/architecture/gateway.md`, sección 2).
+Solo lee y encola: no toca `contacts`, `conversations` ni `messages`.
+
+```python
+from modules.channels.instagram import InstagramAdapter, InstagramCli
+from modules.channels.instagram.poller import poll_once
+from shared.db.connection import connect
+
+conn = connect()
+adapter = InstagramAdapter(InstagramCli(account="nombre_de_usuario"))
+result = poll_once(conn, adapter, channel_account_id=1)  # la fila de esa cuenta
+```
+
+En cada pasada lee las conversaciones recientes (`inbox`, 10 como mucho) y los últimos 20
+mensajes de cada una, y los encola. Cada conversación va en su propia transacción.
+
+- **Relecturas:** un mensaje que ya está en la cola no se vuelve a encolar (`UNIQUE`), así que
+  el lector no necesita recordar dónde se quedó.
+- **Grupos:** no se encolan (fuera del MVP).
+- **Errores:** si falla una conversación, se anota en `failed_conversations` y se sigue con
+  las demás; la siguiente pasada la reintenta. Si la sesión ha caducado
+  (`InstagramAuthError`) o no está instagram-cli, se para toda la pasada.
+- **Historial (`is_backfill`):** se guarda todo, porque es el contexto de cada cliente, pero el
+  historial no se contesta:
+
+| Caso | Qué se contesta |
+|---|---|
+| Primera pasada de la cuenta | Nada: es el pasado. |
+| Conversación que el lector no había visto (reaparece porque el cliente escribe) | Lo que el cliente escribió después de nuestra última respuesta. |
+| Solicitud de mensaje aceptada en la app (sin respuestas nuestras) | Todo. |
+| Conversación ya conocida | Todo lo nuevo. |
+
+Cada cuánto se ejecuta y cómo se arranca está pendiente (`gateway.md`, decisión abierta 1).
 
 ## Tests
 
