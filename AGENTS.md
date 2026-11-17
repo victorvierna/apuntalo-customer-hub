@@ -31,7 +31,9 @@ necesite intervención humana se deriva a Bárbara (equipo de Apúntalo).
   - `rag/` — busca en `data/faqs/` la información para responder; si no la encuentra, devuelve vacío.
   - `router/` — escoge el mejor modelo para contestar según la entrada.
 - `shared/` — código usado por 2 o más módulos: `config/`, `db/`, `types/`, `utils/`.
-  - `db/` — acceso a la base de datos SQLite; `init_db.py` crea el esquema.
+  - `db/` — acceso a la base de datos SQLite: todo el SQL va aquí. `init_db.py` crea el esquema;
+    `connection.py` abre la conexión (`connect()`), agrupa escrituras (`transaction()`) y da el
+    formato de fechas (`to_db_time()`).
 - `storage/` — datos locales generados en ejecución, como la base de datos
   `apuntalo-marketing-platform.db`. Contiene datos reales de clientes: git lo ignora.
 
