@@ -171,3 +171,36 @@ def is_known_conversation(
         (channel_account_id, conversation_external_id, channel_account_id, conversation_external_id),
     ).fetchone()
     return bool(row[0])
+
+
+def last_known_message_id(
+    conn: sqlite3.Connection, channel_account_id: int, conversation_external_id: str
+) -> str | None:
+    """Channel id of the newest message we already have for a conversation.
+
+    Looks at the stored messages first and then at the queue, because old
+    ``done`` rows of the queue can be deleted. ``None`` if there are none.
+    """
+    row = conn.execute(
+        """
+        SELECT m.external_id
+        FROM messages m
+        JOIN conversations c ON c.id = m.conversation_id
+        WHERE c.channel_account_id = ? AND c.external_id = ? AND m.external_id IS NOT NULL
+        ORDER BY m.created_at DESC, m.id DESC
+        LIMIT 1
+        """,
+        (channel_account_id, conversation_external_id),
+    ).fetchone()
+    if row is not None:
+        return row[0]
+    row = conn.execute(
+        """
+        SELECT message_external_id FROM inbound_queue
+        WHERE channel_account_id = ? AND conversation_external_id = ?
+        ORDER BY enqueued_at DESC, id DESC
+        LIMIT 1
+        """,
+        (channel_account_id, conversation_external_id),
+    ).fetchone()
+    return row[0] if row is not None else None

@@ -18,6 +18,7 @@ message really appears in the conversation unless told otherwise.
 import re
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from shared.types.messages import ChannelConversation, ChannelMessage
@@ -37,6 +38,9 @@ _CONVERSATION_ID = re.compile(r"\d{20,}")
 VERIFY_ATTEMPTS = 2
 VERIFY_DELAY_SECONDS = 2.0
 VERIFY_READ_LIMIT = 10
+
+INBOX_MAX = 10
+"""instagram-cli 2.1.0 returns at most this many conversations from ``inbox``."""
 
 
 class InstagramAdapter:
@@ -80,12 +84,26 @@ class InstagramAdapter:
         Does not mark the conversation as seen, so the contact does not get a
         "Seen" without an answer.
         """
+        return self.read_page(conversation_id, limit=limit).messages
+
+    def read_page(
+        self, conversation_id: str, limit: int = 20, cursor: str | None = None
+    ) -> "MessagePage":
+        """One page of messages, oldest first. Pass ``next_cursor`` back to get older ones.
+
+        ``next_cursor`` is ``None`` when there are no older messages.
+        """
         _check_conversation_id(conversation_id)
         _check_limit(limit)
-        data = self._cli.run(["read", conversation_id, f"--limit={limit}"])
+        args = ["read", conversation_id, f"--limit={limit}"]
+        if cursor is not None:
+            args.append(f"--cursor={cursor}")
+        data = self._cli.run(args)
         if not isinstance(data, dict) or not isinstance(data.get("messages"), list):
             raise InstagramFormatError("read: 'data.messages' must be a list.")
-        return [to_message(item, conversation_id) for item in data["messages"]]
+        messages = [to_message(item, conversation_id) for item in data["messages"]]
+        next_cursor = data.get("cursor") or None
+        return MessagePage(messages=messages, next_cursor=next_cursor)
 
     def send_text(self, conversation_id: str, text: str, verify: bool = True) -> str:
         """Sends a text message and returns its message id.
@@ -167,6 +185,14 @@ def _check_conversation_id(conversation_id: str) -> None:
             f"Invalid Instagram conversation id {conversation_id!r}: "
             "expected the numeric id returned by list_conversations()."
         )
+
+
+@dataclass(frozen=True, slots=True)
+class MessagePage:
+    """One ``read`` page: its messages (oldest first) and the cursor for older ones."""
+
+    messages: list[ChannelMessage]
+    next_cursor: str | None
 
 
 def _check_limit(limit: int) -> None:

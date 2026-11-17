@@ -6,6 +6,7 @@ Every id, name and text is invented. Never put real customer data here.
 import unittest
 from datetime import timedelta
 
+from modules.channels.instagram.adapter import MessagePage
 from modules.channels.instagram.errors import InstagramAuthError, InstagramCliError
 from modules.channels.instagram.poller import backfill_flags, poll_once
 from modules.gateway import run_once
@@ -36,9 +37,18 @@ class FakeAdapter:
         return [conv for conv, _ in self.threads.values()][:limit]
 
     def read_messages(self, conversation_id, limit=20):
+        return self.read_page(conversation_id, limit).messages
+
+    def read_page(self, conversation_id, limit=20, cursor=None):
         if conversation_id in self.failing:
             raise self.failing[conversation_id]
-        return self.threads[conversation_id][1][-limit:]
+        messages = self.threads[conversation_id][1]
+        end = len(messages) if cursor is None else int(cursor)
+        start = max(0, end - limit)
+        return MessagePage(
+            messages=messages[start:end],
+            next_cursor=str(start) if start > 0 else None,
+        )
 
 
 def msg(external_id, minutes, direction=Direction.IN, thread_id=THREAD_A, body="hola"):
@@ -187,6 +197,44 @@ class ReaderAndGatewayTest(PollerTestCase):
         self.assertIs(decision.result, GatewayResult.ACCEPTED)
         self.assertEqual(len(decision.message_ids), 1)
         self.assertEqual(self.count("messages", "conversation_id = ?", (decision.conversation_id,)), 4)
+
+
+class PagingTest(PollerTestCase):
+    def test_a_long_gap_is_read_back_to_the_last_message_we_had(self):
+        self.adapter.add(THREAD_A, msg("a0", 0))
+        self.poll()
+        # 25 messages arrived while the reader was down: more than one page.
+        self.adapter.write(THREAD_A, *(msg(f"n{i}", i + 1) for i in range(25)))
+
+        result = self.poll(at=T0 + timedelta(minutes=30))
+
+        self.assertEqual(result.messages_queued, 25)
+        self.assertEqual(result.gap_conversations, [])
+        self.assertEqual(len(self.queued()), 26)
+
+    def test_too_many_missed_messages_are_reported_as_a_gap(self):
+        self.adapter.add(THREAD_A, msg("a0", 0))
+        self.poll()
+        self.adapter.write(THREAD_A, *(msg(f"n{i}", i + 1) for i in range(250)))
+
+        result = self.poll(at=T0 + timedelta(hours=5))
+
+        self.assertEqual(result.gap_conversations, [THREAD_A])
+        self.assertEqual(result.messages_queued, 200)
+        self.assertEqual(len(self.queued()), 201)  # a0 from the first pass, plus 200 newest
+
+    def test_a_full_inbox_is_reported(self):
+        for i in range(10):
+            self.adapter.add(f"thread-{i}", msg(f"m{i}", i, thread_id=f"thread-{i}"))
+
+        result = self.poll()
+
+        self.assertTrue(result.inbox_full)
+
+    def test_a_short_inbox_is_not_reported(self):
+        self.adapter.add(THREAD_A, msg("a1", 0))
+
+        self.assertFalse(self.poll().inbox_full)
 
 
 if __name__ == "__main__":

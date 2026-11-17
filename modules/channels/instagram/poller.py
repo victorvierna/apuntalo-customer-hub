@@ -31,10 +31,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from shared.db.connection import to_db_time, transaction
-from shared.db.queue import enqueue, has_synced, is_known_conversation
+from shared.db.queue import enqueue, has_synced, is_known_conversation, last_known_message_id
 from shared.types.messages import ChannelMessage, Direction
 
-from .adapter import InstagramAdapter
+from .adapter import INBOX_MAX, InstagramAdapter
 from .errors import InstagramAuthError, InstagramCliError, InstagramCliNotFoundError
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,14 @@ CONVERSATIONS_LIMIT = 20
 """Asked for in every pass. instagram-cli 2.1.0 returns at most 10 anyway."""
 
 MESSAGES_LIMIT = 20
-"""Latest messages read from each conversation."""
+"""Messages per ``read`` page."""
+
+MAX_PAGES = 10
+"""Pages read back in one conversation looking for the last message we already have.
+
+With 20 messages a page, this is 200 messages of margin. If the anchor is still not
+found, the conversation is reported as a gap instead of reading forever.
+"""
 
 
 @dataclass(slots=True)
@@ -56,6 +63,13 @@ class PollResult:
     groups_skipped: int = 0
     failed_conversations: list[str] = field(default_factory=list)
     """Conversations that could not be read this pass. The next pass retries them."""
+    gap_conversations: list[str] = field(default_factory=list)
+    """Conversations where the last message we had is not in the pages read, so
+    some messages may have been lost (more than ``MAX_PAGES`` pages came in while
+    the reader was down). A person should look at them."""
+    inbox_full: bool = False
+    """``inbox`` returned as many conversations as it can. Older conversations may
+    be missing from this pass; they show up again when someone writes."""
 
 
 def poll_once(
@@ -81,13 +95,30 @@ def poll_once(
     # the first pass, the account would already look synced.
     result = PollResult(first_sync=not has_synced(conn, channel_account_id))
 
-    for conversation in adapter.list_conversations(limit=CONVERSATIONS_LIMIT):
+    conversations = adapter.list_conversations(limit=CONVERSATIONS_LIMIT)
+    if len(conversations) >= INBOX_MAX:
+        result.inbox_full = True
+        logger.warning(
+            "Inbox of account %s returned %d conversations (the maximum); older ones may be missing.",
+            channel_account_id,
+            len(conversations),
+        )
+
+    for conversation in conversations:
         # Group conversations are not in the MVP.
         if len(conversation.participants) > 1:
             result.groups_skipped += 1
             continue
+        known = not result.first_sync and is_known_conversation(
+            conn, channel_account_id, conversation.external_id
+        )
+        anchor = (
+            last_known_message_id(conn, channel_account_id, conversation.external_id)
+            if known
+            else None
+        )
         try:
-            messages = adapter.read_messages(conversation.external_id, limit=MESSAGES_LIMIT)
+            messages, has_older = _read_back_to(adapter, conversation.external_id, anchor)
         except (InstagramAuthError, InstagramCliNotFoundError):
             raise
         except InstagramCliError:
@@ -100,9 +131,15 @@ def poll_once(
             result.failed_conversations.append(conversation.external_id)
             continue
 
-        known = not result.first_sync and is_known_conversation(
-            conn, channel_account_id, conversation.external_id
-        )
+        if anchor is not None and has_older and not any(m.external_id == anchor for m in messages):
+            result.gap_conversations.append(conversation.external_id)
+            logger.warning(
+                "Conversation %s of account %s: the last message we had is not in the %d pages read; messages may be lost.",
+                conversation.external_id,
+                channel_account_id,
+                MAX_PAGES,
+            )
+
         flags = backfill_flags(messages, first_sync=result.first_sync, known=known)
         with transaction(conn):
             for message, is_backfill in zip(messages, flags, strict=True):
@@ -111,6 +148,32 @@ def poll_once(
         result.conversations_read += 1
 
     return result
+
+
+def _read_back_to(
+    adapter: InstagramAdapter, conversation_id: str, anchor: str | None
+) -> tuple[list[ChannelMessage], bool]:
+    """The newest messages of a conversation, oldest first, going back to ``anchor``.
+
+    Reads pages until the anchor (the last message we already have) shows up, there
+    are no older messages, or ``MAX_PAGES`` pages were read. Returns the messages and
+    whether older messages still exist that were not read.
+    """
+    page = adapter.read_page(conversation_id, limit=MESSAGES_LIMIT)
+    messages = list(page.messages)
+    cursor = page.next_cursor
+    pages = 1
+    while (
+        anchor is not None
+        and cursor is not None
+        and not any(m.external_id == anchor for m in messages)
+        and pages < MAX_PAGES
+    ):
+        page = adapter.read_page(conversation_id, limit=MESSAGES_LIMIT, cursor=cursor)
+        messages = page.messages + messages
+        cursor = page.next_cursor
+        pages += 1
+    return messages, cursor is not None
 
 
 def backfill_flags(

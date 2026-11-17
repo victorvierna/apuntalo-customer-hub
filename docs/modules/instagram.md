@@ -233,6 +233,17 @@ result = poll_once(conn, adapter, channel_account_id=1)  # la fila de esa cuenta
 En cada pasada lee las conversaciones recientes (`inbox`, 10 como mucho) y los últimos 20
 mensajes de cada una, y los encola. Cada conversación va en su propia transacción.
 
+- **Sin límite fijo de mensajes:** si una conversación ya la conocíamos, el lector pide páginas
+  anteriores (`read --cursor`) hasta encontrar el último mensaje que ya tiene (el ancla), con
+  un máximo de `MAX_PAGES` = 10 páginas (200 mensajes). Así, una caída larga no pierde nada
+  mientras no lleguen más de 200 mensajes en esa conversación.
+- **Huecos:** si no se encuentra el ancla dentro del máximo, la conversación aparece en
+  `result.gap_conversations` y se escribe un aviso en el log: puede haber mensajes perdidos y
+  hace falta que una persona lo mire.
+- **Bandeja llena:** si `inbox` devuelve 10 conversaciones (el máximo que da instagram-cli),
+  `result.inbox_full` es `True` y se avisa en el log: las conversaciones más antiguas pueden no
+  aparecer en esa pasada. Esto **no** está resuelto: instagram-cli no ofrece paginar `inbox`.
+
 - **Relecturas:** un mensaje que ya está en la cola no se vuelve a encolar (`UNIQUE`), así que
   el lector no necesita recordar dónde se quedó.
 - **Grupos:** no se encolan (fuera del MVP).
