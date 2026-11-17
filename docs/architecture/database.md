@@ -83,6 +83,7 @@ people ──< blocks (bloqueos de la persona, en cualquier canal o cuenta)
                     │
 channel_accounts ─┐ │
                   ├──< inbound_queue (cola: lo que lee el canal, antes de guardarlo)
+                  ├──< conversation_checks (cuándo leyó el lector cada conversación)
                   ├─┴──< conversations ──< messages
                   │             │                │ (cada mensaje entrante; varios si llegan en ráfaga)
                   │             │                └──< run_messages >── processing_runs ──< model_calls
@@ -473,8 +474,8 @@ pending ──(el gateway procesa la ráfaga)──> done
 
 Funcionamiento del gateway, en bucle (`modules/gateway/worker.py`):
 
-1. **Buscar conversaciones listas:** las que tienen filas `pending` y llevan unos segundos sin
-   mensajes nuevos (ventana de la ráfaga, decisión abierta 12).
+1. **Buscar conversaciones listas:** las que tienen filas `pending` y cuya ráfaga ha terminado
+   (ver "Cuándo termina una ráfaga", más abajo, y la tabla 6.15).
 2. **Procesar cada ráfaga en una sola transacción** (`BEGIN IMMEDIATE`): leer sus filas,
    guardar cada mensaje sin duplicados, crear **un** procesamiento para todos los mensajes
    entrantes nuevos (`run_messages`) y marcar las filas `done`. El bloqueo de escritura evita
@@ -482,31 +483,46 @@ Funcionamiento del gateway, en bucle (`modules/gateway/worker.py`):
 3. **Si falla**, se deshace todo (los mensajes no quedan guardados) y las filas suman un
    intento. Tras varios intentos pasan a `failed` y el dashboard las muestra.
 
-**El estado `processing` no se usa** (ni su índice `idx_queue_processing`). La primera versión
-del diseño marcaba la ráfaga como `processing` antes de procesarla. Si el gateway se caía a
-mitad, el reintento encontraba los mensajes ya guardados, los tomaba por relecturas y el
-cliente se quedaba sin respuesta. Con una sola transacción, una caída lo deshace todo y el
-reintento los ve como nuevos. Lo que queda por contestar no depende de la cola, sino de los
-procesamientos abiertos (`processing_runs.finished_at` vacío; ver `gateway.md`, sección 2).
-`processing` se puede quitar del esquema en una versión futura.
+**No hay estado intermedio `processing`** (se quitó en la versión 5). La primera versión del
+diseño marcaba la ráfaga como `processing` antes de procesarla. Si el gateway se caía a mitad,
+el reintento encontraba los mensajes ya guardados, los tomaba por relecturas y el cliente se
+quedaba sin respuesta. Con una sola transacción, una caída lo deshace todo y el reintento los
+ve como nuevos. Lo que queda por contestar no depende de la cola, sino de los procesamientos
+abiertos (`processing_runs.finished_at` vacío; ver `gateway.md`, sección 2).
 
-Ejemplo: Ana escribe "hola", "una duda" y "¿cuánto cuesta el curso?" en pocos segundos. El
-lector los encola en una o dos pasadas. El gateway espera a que la conversación lleve 8 s sin
-mensajes nuevos, coge los tres, crea un solo procesamiento y responde una sola vez.
+**Cuándo termina una ráfaga.** Ana escribe "hola", "una duda" y "¿cuánto cuesta el curso?"
+con unos segundos entre cada uno. El gateway no ve Instagram, solo la cola: que no lleguen
+filas nuevas no significa que Ana haya dejado de escribir, sino quizá que el lector todavía no
+ha vuelto a mirar su conversación (una pasada por 10 conversaciones tarda cerca de un minuto).
+Por eso:
+
+1. Cuando el lector encuentra mensajes nuevos de Ana, apunta releer su conversación 20 s
+   después (`conversation_checks.recheck_at`), sin esperar a la siguiente pasada.
+2. Si la relectura encuentra más mensajes, los encola y vuelve a apuntar otros 20 s.
+3. Cuando una relectura hecha al menos 20 s después del último mensaje encolado no encuentra
+   nada nuevo, la ráfaga ha terminado: el gateway coge los tres mensajes, crea un solo
+   procesamiento y se responde una sola vez.
+
+El gateway también coge la ráfaga sin esperar si no hay nada que contestar (solo historial o
+mensajes salientes) y, como red de seguridad, si pasan 2 minutos sin mensajes nuevos aunque
+ninguna relectura lo haya confirmado (el lector está caído o las relecturas fallan): así nadie
+se queda sin respuesta, aunque la ráfaga pueda llegar en dos partes. Los dos tiempos
+(`QUIET_PERIOD` y `MAX_WAIT`) están en `shared/db/queue.py`, porque los usan el lector y el
+gateway y tienen que coincidir.
 
 **Las relecturas no cuentan como mensajes nuevos.** El lector vuelve a leer las conversaciones
 recientes en cada pasada y vuelve a encolar mensajes que ya conoce. El
 `UNIQUE (channel_account_id, message_external_id)` hace que esas relecturas no inserten nada
 (`INSERT … ON CONFLICT DO NOTHING`). Esto es imprescindible para las ráfagas: si cada relectura
-creara una fila nueva, la conversación nunca llevaría 8 s "en silencio" y no se procesaría
+creara una fila nueva, siempre parecería que hay mensajes nuevos y la ráfaga no terminaría
 nunca. También evita que la cola crezca sin control.
 
 **El historial no se contesta.** En la primera sincronización de una cuenta, el lector encola
 las conversaciones antiguas con `is_backfill = 1`. El gateway las guarda (identidad,
 conversación y mensajes, para que el dashboard tenga el hilo completo), pero no crea
 procesamiento ni las pasa al enrutador. Sin esta marca, los mensajes antiguos serían "nuevos"
-para la base de datos y el asistente los contestaría. Cómo decide el lector qué es historial es
-la decisión abierta 14.
+para la base de datos y el asistente los contestaría. Cómo decide el lector qué es historial:
+decisión 14.
 
 | Campo | Tipo | Por qué existe |
 |---|---|---|
@@ -516,10 +532,10 @@ la decisión abierta 14.
 | `message_external_id` | TEXT | Id del mensaje en el canal. Con `UNIQUE (channel_account_id, message_external_id)`, un mensaje se encola una sola vez aunque el lector lo relea. |
 | `is_backfill` | INTEGER (booleano), por defecto `0` | `1` = historial de la primera sincronización: se guarda, pero no se contesta. |
 | `payload` | TEXT (JSON) | `ChannelConversation` + `ChannelMessage` tal como los da el adaptador. Un `CHECK` exige JSON válido. |
-| `status` | TEXT + CHECK | `pending`, `processing`, `done` o `failed` (ver ciclo de vida). |
+| `status` | TEXT + CHECK | `pending`, `done` o `failed` (ver ciclo de vida). |
 | `attempts` | INTEGER, por defecto `0` | Intentos fallidos de procesar la ráfaga. Evita reintentar sin fin: al llegar al máximo, la fila pasa a `failed`. |
 | `error` | TEXT, opcional | Último error, para depurar las filas `failed`. |
-| `enqueued_at` | TEXT | Cuándo se encoló, **con nuestro reloj**. Se usa para la ventana de la ráfaga porque es fiable; la fecha del canal puede llegar con retraso. |
+| `enqueued_at` | TEXT | Cuándo empezó la lectura que lo encoló, **con nuestro reloj**. Se usa para saber cuándo termina la ráfaga porque es fiable; la fecha del canal puede llegar con retraso. |
 | `started_at` | TEXT, opcional | Cuándo la procesó el gateway. Obligatorio salvo en `pending`. |
 | `finished_at` | TEXT, opcional | Cuándo terminó. Obligatorio en `done` y `failed`. |
 
@@ -529,6 +545,24 @@ la decisión abierta 14.
 
 **La salida (enviar respuestas)** puede seguir el mismo patrón en sentido contrario. Se
 diseñará con el envío de respuestas (`gateway.md`, sección 2).
+
+### 6.15 `conversation_checks` — cuándo leyó el lector cada conversación
+
+Una fila por conversación de cada cuenta. La escribe el lector del canal cada vez que lee una
+conversación, en la misma transacción en la que encola lo que ha encontrado; la lee el gateway
+para saber si una ráfaga ha terminado (6.14, "Cuándo termina una ráfaga").
+
+| Campo | Tipo | Por qué existe |
+|---|---|---|
+| `channel_account_id` | FK → `channel_accounts` | Cuenta propia que leyó la conversación. Con `conversation_external_id`, forma la clave primaria. |
+| `conversation_external_id` | TEXT | Id de la conversación en el canal, igual que en `inbound_queue`. |
+| `checked_at` | TEXT | Cuándo **empezó** la última lectura: todo lo que se escribió antes está en lo que se leyó. La ráfaga ha terminado cuando `checked_at` es al menos 20 s posterior al último mensaje encolado. |
+| `recheck_at` | TEXT, opcional | Cuándo hay que volver a leer la conversación porque hay una ráfaga en curso. Vacío si no hace falta. Una lectura sin nada nuevo antes de esa hora (la de la pasada normal) no lo borra. |
+
+**Independiente del canal.** La tabla y la regla del gateway no saben nada de Instagram. Un
+canal que hay que ir preguntando (como Instagram) usa las relecturas. Un canal que avisa al
+recibir cada mensaje (webhooks) no necesita releer: su receptor apuntaría `checked_at` al
+recibir cada mensaje y el gateway funcionaría igual.
 
 ## 7. Índices
 
@@ -540,7 +574,7 @@ diseñará con el envío de respuestas (`gateway.md`, sección 2).
 | `run_messages(message_id)` | Ir de un mensaje a cómo se procesó. Ir de un procesamiento a sus mensajes ya lo cubre la clave primaria `(run_id, message_id)`. |
 | `routing_decisions(run_id, phase)` | Ir de un procesamiento a las fases del enrutador. Lo crea automáticamente el `UNIQUE (run_id, phase)`. |
 | `inbound_queue(channel_account_id, conversation_external_id, enqueued_at) WHERE status = 'pending'` | La consulta del gateway en cada vuelta: qué conversaciones tienen mensajes pendientes y cuándo llegó el último. Índice parcial: solo contiene lo pendiente, así sigue siendo pequeño aunque la cola acumule filas `done`. |
-| `inbound_queue(started_at) WHERE status = 'processing'` | Sin uso: el gateway no usa el estado `processing` (ver 6.14). Se puede quitar en una versión futura. |
+| `conversation_checks(recheck_at) WHERE recheck_at IS NOT NULL` | La consulta del lector antes de cada lectura: qué relecturas tocan ya. Índice parcial: solo contiene las ráfagas en curso. |
 | `model_calls(run_id)` | Ir de un procesamiento a sus llamadas y su coste. |
 | `conversation_summaries(conversation_id, created_at)` | Ver los resúmenes de un ticket en orden. |
 | `contacts(person_id)` | Ir de una persona a todas sus identidades (y de ahí a sus conversaciones). |
@@ -662,7 +696,7 @@ CREATE TABLE inbound_queue (
   is_backfill               INTEGER NOT NULL DEFAULT 0 CHECK (is_backfill IN (0, 1)),
   payload                   TEXT NOT NULL CHECK (json_valid(payload)),
   status                    TEXT NOT NULL DEFAULT 'pending'
-                            CHECK (status IN ('pending', 'processing', 'done', 'failed')),
+                            CHECK (status IN ('pending', 'done', 'failed')),
   attempts                  INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
   error                     TEXT,
   enqueued_at               TEXT NOT NULL,
@@ -671,6 +705,14 @@ CREATE TABLE inbound_queue (
   UNIQUE (channel_account_id, message_external_id),
   CHECK (status = 'pending' OR started_at IS NOT NULL),
   CHECK (status NOT IN ('done', 'failed') OR finished_at IS NOT NULL)
+) STRICT;
+
+CREATE TABLE conversation_checks (
+  channel_account_id        INTEGER NOT NULL REFERENCES channel_accounts(id),
+  conversation_external_id  TEXT NOT NULL,
+  checked_at                TEXT NOT NULL,
+  recheck_at                TEXT,
+  PRIMARY KEY (channel_account_id, conversation_external_id)
 ) STRICT;
 
 CREATE TABLE run_messages (
@@ -777,7 +819,7 @@ CREATE INDEX idx_run_messages_msg    ON run_messages(message_id);
 CREATE INDEX idx_queue_pending       ON inbound_queue(channel_account_id, conversation_external_id,
                                                       enqueued_at)
                                      WHERE status = 'pending';
-CREATE INDEX idx_queue_processing    ON inbound_queue(started_at) WHERE status = 'processing';
+CREATE INDEX idx_checks_due         ON conversation_checks(recheck_at) WHERE recheck_at IS NOT NULL;
 CREATE INDEX idx_model_calls_run     ON model_calls(run_id);
 CREATE INDEX idx_summaries_conv      ON conversation_summaries(conversation_id, created_at);
 CREATE INDEX idx_contacts_person     ON contacts(person_id);
@@ -835,7 +877,7 @@ se basa en una FAQ.
     `python shared/db/init_db.py`, solo usa la librería estándar de Python y se puede
     ejecutar varias veces sin problema: guarda la versión del esquema en
     `PRAGMA user_version` y solo lo aplica una vez.
-  - **Versión actual del esquema: 4.**
+  - **Versión actual del esquema: 5.**
     - La versión 2 añadió `people` y `blocks`, enlazó `contacts` con `people` y añadió
       `blocked_contact` a `processing_runs.gateway_result`.
     - La versión 3 añadió los datos del enrutador: las tablas `run_messages` y
@@ -843,8 +885,10 @@ se basa en una FAQ.
       `decided_by`, `output_result` y `outcome`, más valores nuevos en `gateway_result` (sin
       `timeout`) y sin la columna `message_id`; y en `model_calls`, `tier`, `status` e
       `is_fallback`. Requiere SQLite 3.38 o superior (por `json_valid`).
-    - La versión 4 añade la cola entre el lector del canal y el gateway (`inbound_queue`), con
+    - La versión 4 añadió la cola entre el lector del canal y el gateway (`inbound_queue`), con
       el diseño de `docs/architecture/gateway.md`.
+    - La versión 5 añade `conversation_checks` (relecturas para saber cuándo termina una
+      ráfaga) y quita de `inbound_queue` el estado `processing` y su índice, que no se usaban.
     - No hay migraciones porque todavía no hay datos reales: si tienes una base de datos
       local de una versión anterior, el script avisa; bórrala y vuelve a crearla.
 - **El archivo `.db` contiene conversaciones reales de clientes.** Nunca va a git:
@@ -895,10 +939,11 @@ se basa en una FAQ.
     tanto es texto libre.
 11. **Qué es "realizar petición" (`action = 'request'`):** no está definido qué hace el
     sistema en ese caso. Por eso `request` no tiene `tier` obligatorio.
-12. **Tiempos de la cola:** cuánto espera el gateway sin mensajes nuevos antes de procesar la
-    ráfaga (propuesta inicial: 8 s, `BURST_WINDOW` en `modules/gateway/worker.py`) y
-    cuántos intentos se permiten (propuesta: 3). Son decisiones del código, no del esquema. La
-    ventana depende también del intervalo del lector (`gateway.md`, decisión abierta 1).
+12. ~~**Tiempos de la cola**~~ **✅ Decidido (2026-11-17), revisable con datos reales:** la
+    ráfaga termina con una relectura sin novedades al menos 20 s después del último mensaje
+    (`QUIET_PERIOD`), con una red de seguridad de 2 minutos (`MAX_WAIT`), los dos en
+    `shared/db/queue.py`; 3 intentos antes de `failed` (`MAX_ATTEMPTS` en
+    `modules/gateway/worker.py`). Son decisiones del código, no del esquema.
 13. **Limpieza de la cola:** cada cuánto se borran las filas `done` antiguas de
     `inbound_queue`. El histórico no se pierde, porque está en `messages`, `run_messages` y
     `processing_runs`. Ojo: si se borra la fila de un mensaje que el lector todavía relee, se

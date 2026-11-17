@@ -3,8 +3,8 @@
 > **Estado:** primera versión implementada en `modules/gateway/` con el lector de Instagram
 > (`modules/channels/instagram/poller.py`); falta el enrutador.
 > **Fecha:** 2026-11-16 (actualizado el 2026-11-17 con el código)
-> **Depende de:** esquema v4 de la base de datos (`people`, `contacts`, `blocks`,
-> `inbound_queue`, `run_messages`, `routing_decisions`), ver `docs/architecture/database.md`.
+> **Depende de:** esquema v5 de la base de datos (`people`, `contacts`, `blocks`,
+> `inbound_queue`, `conversation_checks`, `run_messages`, `routing_decisions`), ver `docs/architecture/database.md`.
 > **Alcance:** qué hace el gateway, en qué orden y qué guarda. No cubre el enrutador, el RAG
 > ni el envío de respuestas.
 
@@ -74,7 +74,7 @@ instagram-cli ──> Lector de Instagram ──encola──> inbound_queue ─�
 - **SQLite basta.** No hace falta instalar un sistema de colas aparte (Redis, RabbitMQ…), y
   la cola queda en el mismo archivo que el resto de datos, con las mismas copias de seguridad.
 
-La tabla está en el esquema v4 (`database.md`, 6.14):
+La tabla está en el esquema v5 (`database.md`, 6.14):
 
 ```sql
 CREATE TABLE inbound_queue (
@@ -85,7 +85,7 @@ CREATE TABLE inbound_queue (
   is_backfill               INTEGER NOT NULL DEFAULT 0 CHECK (is_backfill IN (0, 1)),
   payload                   TEXT NOT NULL CHECK (json_valid(payload)),  -- ChannelConversation + ChannelMessage
   status                    TEXT NOT NULL DEFAULT 'pending'
-                            CHECK (status IN ('pending', 'processing', 'done', 'failed')),
+                            CHECK (status IN ('pending', 'done', 'failed')),
   attempts                  INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
   error                     TEXT,
   enqueued_at               TEXT NOT NULL,
@@ -103,13 +103,21 @@ aparecían al combinar la cola con las ráfagas y con la primera sincronización
 | Columna | Problema que resuelve |
 |---|---|
 | `conversation_external_id` | Agrupar por conversación los mensajes que llegan seguidos (ráfagas, ver más abajo) con un índice, sin abrir el JSON. |
-| `message_external_id` + `UNIQUE` | El lector relee las conversaciones recientes en cada pasada. Con el `UNIQUE`, encolar un mensaje que ya está es `INSERT … ON CONFLICT DO NOTHING` y no crea fila. Sin esto, cada relectura parecería un mensaje nuevo, la ráfaga nunca llegaría a los segundos de silencio que espera el gateway y la cola crecería sin control. Por eso el lector ya no necesita guardar hasta qué mensaje leyó. |
+| `message_external_id` + `UNIQUE` | El lector relee las conversaciones recientes en cada pasada. Con el `UNIQUE`, encolar un mensaje que ya está es `INSERT … ON CONFLICT DO NOTHING` y no crea fila. Sin esto, cada relectura parecería un mensaje nuevo, la ráfaga no terminaría nunca y la cola crecería sin control. Por eso el lector ya no necesita guardar hasta qué mensaje leyó. |
 | `is_backfill` | En la primera sincronización, todos los mensajes antiguos son nuevos para la base de datos y el asistente los contestaría. El lector los marca como historial: el gateway los guarda, pero no los contesta. |
 
 - **Ráfagas.** En Instagram es habitual escribir una consulta en varios mensajes seguidos
   ("hola" / "una duda" / "¿cuánto cuesta?"). El gateway no coge mensajes sueltos, sino **todos
-  los `pending` de una conversación** cuando esa conversación lleva unos segundos sin mensajes
-  nuevos (propuesta: 8 s, contados con `enqueued_at`). Así se contesta una sola vez.
+  los `pending` de una conversación** cuando su ráfaga ha terminado, y así se contesta una sola
+  vez. El gateway no ve el canal, así que no puede fiarse de que no lleguen filas nuevas: quizá
+  el lector todavía no ha vuelto a mirar esa conversación (una pasada por 10 conversaciones
+  tarda cerca de un minuto). Por eso, cuando el lector encuentra mensajes nuevos de un cliente,
+  **relee esa conversación 20 s después** (y otra vez si encuentra más), sin esperar a la
+  siguiente pasada. La ráfaga termina cuando una relectura hecha al menos 20 s después del
+  último mensaje no encuentra nada nuevo. Si no hay nada que contestar (solo historial o
+  salientes) no se espera, y si pasan 2 minutos sin confirmarlo (lector caído, relecturas que
+  fallan), el gateway la coge igualmente. Detalle en `database.md`, 6.14 y 6.15
+  (`conversation_checks`).
 - **Cada ráfaga se procesa en una sola transacción** (`BEGIN IMMEDIATE`): leer sus filas,
   guardar los mensajes, decidir, crear el procesamiento y marcar las filas como `done`. Como
   dentro no se llama a ningún modelo ni a Instagram, es muy corta. `BEGIN IMMEDIATE` coge el
@@ -118,8 +126,8 @@ aparecían al combinar la cola con las ráfagas y con la primera sincronización
   mitad, la base de datos deshace todo y las filas siguen `pending`, con sus mensajes sin
   guardar. Al reintentar, los mensajes se ven como nuevos y se contestan. Con el estado
   intermedio `processing`, un reintento encontraba los mensajes ya guardados, los tomaba por
-  relecturas y el cliente se quedaba sin respuesta. Por eso el gateway no usa `processing` (el
-  valor sigue en el `CHECK` del esquema, sin uso).
+  relecturas y el cliente se quedaba sin respuesta. Por eso no existe el estado `processing`
+  (se quitó del esquema en la versión 5).
 - **Lo que queda por contestar no depende de la cola.** Una ráfaga aceptada deja un
   procesamiento abierto (`processing_runs.finished_at` vacío) en la misma transacción en la
   que se marca `done`. Si el sistema se cae mientras se piensa o se envía la respuesta, al
@@ -423,7 +431,7 @@ Todo con la librería estándar (`docs/decisions/0001-python.md`).
 
 | Ruta | Qué contiene |
 |---|---|
-| `modules/gateway/worker.py` | `run_once()`: busca las conversaciones con la ráfaga lista y procesa cada una en su transacción. Aquí están la ventana de la ráfaga (`BURST_WINDOW`, 8 s) y los intentos (`MAX_ATTEMPTS`, 3). |
+| `modules/gateway/worker.py` | `run_once()`: busca las conversaciones con la ráfaga lista y procesa cada una en su transacción. Aquí están los intentos (`MAX_ATTEMPTS`, 3); cuándo termina una ráfaga se decide en `shared/db/queue.py` (`QUIET_PERIOD`, 20 s; `MAX_WAIT`, 2 min), porque el lector usa los mismos tiempos. |
 | `modules/gateway/pipeline.py` | `process_burst()`: guarda la ráfaga, pasa las comprobaciones y crea el procesamiento (y la derivación, si hace falta). |
 | `modules/gateway/ingest.py` | Pasos 1 a 4: guardar la ráfaga (identidad, conversación y mensajes, sin duplicados). |
 | `modules/gateway/identity.py` | Sección 5: quién es y si es la primera vez. |
@@ -446,14 +454,12 @@ en `docs/modules/instagram.md`.
 
 ## 9. Decisiones abiertas
 
-1. **Cada cuánto se ejecutan el lector y el gateway.** Cada comando de instagram-cli tarda
-   unos 5–6 s y `inbox` devuelve como mucho 10 conversaciones, así que el intervalo del
-   lector marca el tiempo mínimo de respuesta. Falta decidirlo con pruebas reales, y también
-   cómo se arrancan los dos scripts (cron, un proceso que no termina, Docker…).
-2. **Ventana de la ráfaga:** cuántos segundos sin mensajes nuevos espera el gateway
-   (propuesta: 8 s). Depende del intervalo del lector (decisión 1): si el lector pasa cada
-   20 s, dos mensajes seguidos pueden caer en pasadas distintas, y la ventana tiene que
-   cubrirlo.
+1. **Cómo se arrancan el lector y el gateway** (cron, un proceso que no termina, Docker…).
+   Cada comando de instagram-cli tarda unos 3–6 s: en una prueba real, una pasada por 12
+   conversaciones tardó 38 s. El lector tiene que ejecutarse en bucle (las relecturas
+   necesitan que llame a menudo a `run_due_rechecks()`) y el gateway, cada pocos segundos.
+2. ~~**Ventana de la ráfaga**~~ **✅ (2026-11-17):** relecturas a los 20 s en vez de una
+   espera fija, con una red de seguridad de 2 minutos (sección 2).
 3. **Cuándo se cierra una conversación (pendiente de definir).** Al cerrarse se genera su
    resumen (`conversation_summaries`, que ya existe en el esquema) y queda archivada hasta que
    la persona vuelva a escribir. Falta definir:
