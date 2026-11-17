@@ -7,15 +7,15 @@ from unittest import mock
 
 from modules.gateway import run_once
 from modules.gateway.ingest import SKIP_GROUP, SKIP_UNKNOWN_CONTACT
-from modules.gateway.worker import BURST_WINDOW, MAX_ATTEMPTS
+from modules.gateway.worker import MAX_ATTEMPTS
 from shared.db.connection import to_db_time
-from shared.db.queue import enqueue
+from shared.db.queue import MAX_WAIT, enqueue
 from shared.db.runs import unfinished_accepted_runs
 from shared.db.tests.helpers import T0, DatabaseTestCase, conversation, message
 from shared.types.gateway import GatewayResult
 from shared.types.messages import ContentType, Direction
 
-LATER = T0 + BURST_WINDOW
+LATER = T0 + MAX_WAIT
 
 
 class GatewayTest(DatabaseTestCase):
@@ -65,7 +65,7 @@ class GatewayTest(DatabaseTestCase):
     def first_person(self, external_id="900"):
         """Processes a first message from this sender and returns their person id."""
         self.enqueue(message(f"first-{external_id}", sender=external_id), at=T0 - timedelta(hours=1))
-        [decision] = self.run_gateway(T0 - timedelta(hours=1) + BURST_WINDOW)
+        [decision] = self.run_gateway(T0 - timedelta(hours=1) + MAX_WAIT)
         return decision.person_id
 
     # Normal flow
@@ -103,9 +103,9 @@ class GatewayTest(DatabaseTestCase):
         ]
         self.assertEqual(bodies, ["hola", "una duda", "¿cuánto cuesta?"])
 
-    def test_waits_for_the_burst_window(self):
+    def test_waits_until_the_burst_is_over(self):
         self.enqueue(message("m1"), at=T0)
-        self.assertEqual(self.run_gateway(now=T0 + BURST_WINDOW - timedelta(seconds=1)), [])
+        self.assertEqual(self.run_gateway(now=T0 + MAX_WAIT - timedelta(seconds=1)), [])
         self.assertEqual(self.queue_statuses(), ["pending"])
         self.assertEqual(len(self.run_gateway()), 1)
 

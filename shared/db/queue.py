@@ -1,13 +1,35 @@
-"""The inbound queue (``inbound_queue``, ``database.md`` 6.14).
+"""The inbound queue (``inbound_queue``, ``database.md`` 6.14) and its checks.
 
-Channel readers write with ``enqueue()``. The gateway reads whole bursts and
-marks them done in the same transaction in which it stores the messages.
+Channel readers write with ``enqueue()`` and record every read of a
+conversation with ``mark_checked()``. The gateway takes a conversation once its
+burst is over (``ready_conversations()``), reads it whole and marks it done in
+the same transaction in which it stores the messages.
+
+**When is a burst over?** Contacts often write one query in several messages.
+The gateway cannot see the channel, so silence in the queue does not mean the
+contact stopped writing: the reader may simply not have looked again. So a
+burst is over when the reader read the conversation again at least
+``QUIET_PERIOD`` after its last queued message and found nothing new
+(``conversation_checks``, ``database.md`` 6.15).
 """
 
 import sqlite3
+from datetime import datetime, timedelta
 
+from shared.db.connection import to_db_time
 from shared.types.messages import ChannelConversation, ChannelMessage
 from shared.types.queue import QueuedMessage, decode_payload, encode_payload
+
+QUIET_PERIOD = timedelta(seconds=20)
+"""A burst is over after this long without new messages, confirmed by a re-read.
+
+The reader re-reads a conversation this long after finding new messages in it,
+and the gateway waits for that re-read. Both use this value, so they agree."""
+
+MAX_WAIT = timedelta(minutes=2)
+"""Safety net: after this long without new queued messages, the burst is taken
+even if no re-read confirmed it (the reader is down, or re-reads keep failing).
+The contact is never left without an answer; the burst may come in two parts."""
 
 
 def enqueue(
@@ -43,22 +65,39 @@ def enqueue(
     return row is not None
 
 
-def ready_conversations(conn: sqlite3.Connection, quiet_since: str) -> list[tuple[int, str]]:
-    """Conversations with pending messages and no new message after ``quiet_since``.
+def ready_conversations(conn: sqlite3.Connection, now: datetime) -> list[tuple[int, str]]:
+    """Conversations with pending messages whose burst is over.
+
+    A burst is over when any of these holds:
+
+    - the reader read the conversation at least ``QUIET_PERIOD`` after its last
+      queued message (and, since nothing new was queued, found nothing new);
+    - there is nothing to answer in it (only history or outgoing messages), so
+      there is nothing to wait for;
+    - ``MAX_WAIT`` has passed since the last queued message (safety net).
 
     Returns ``(channel_account_id, conversation_external_id)`` pairs, the
     oldest burst first.
     """
     rows = conn.execute(
         """
-        SELECT channel_account_id, conversation_external_id
-        FROM inbound_queue
-        WHERE status = 'pending'
-        GROUP BY channel_account_id, conversation_external_id
-        HAVING MAX(enqueued_at) <= ?
-        ORDER BY MIN(enqueued_at)
+        SELECT q.channel_account_id, q.conversation_external_id
+        FROM inbound_queue q
+        LEFT JOIN conversation_checks c
+               ON c.channel_account_id = q.channel_account_id
+              AND c.conversation_external_id = q.conversation_external_id
+        WHERE q.status = 'pending'
+        GROUP BY q.channel_account_id, q.conversation_external_id
+        HAVING MAX(c.checked_at) >= strftime('%Y-%m-%dT%H:%M:%fZ', MAX(q.enqueued_at), ?)
+            OR SUM(q.is_backfill = 0
+                   AND json_extract(q.payload, '$.message.direction') = 'in') = 0
+            OR MAX(q.enqueued_at) <= ?
+        ORDER BY MIN(q.enqueued_at)
         """,
-        (quiet_since,),
+        (
+            f"+{QUIET_PERIOD.total_seconds():g} seconds",
+            to_db_time(now - MAX_WAIT),
+        ),
     ).fetchall()
     return [(row["channel_account_id"], row["conversation_external_id"]) for row in rows]
 
@@ -204,3 +243,90 @@ def last_known_message_id(
         (channel_account_id, conversation_external_id),
     ).fetchone()
     return row[0] if row is not None else None
+
+
+def mark_checked(
+    conn: sqlite3.Connection,
+    channel_account_id: int,
+    conversation_external_id: str,
+    checked_at: str,
+    found_new_incoming: bool,
+) -> None:
+    """Records that the reader read a conversation (when the read started).
+
+    If it found new messages from the contact, the burst may go on: it asks for
+    a re-read ``QUIET_PERIOD`` later. If it found nothing new, a re-read still
+    pending (the read came early, e.g. in the normal pass) is kept; one that
+    is due is done.
+
+    Call it in the same transaction as the ``enqueue()`` calls of that read, so
+    the gateway never sees the messages without the check or the other way round.
+    """
+    recheck_at = None
+    if found_new_incoming:
+        recheck_at = to_db_time(_parse(checked_at) + QUIET_PERIOD)
+    conn.execute(
+        """
+        INSERT INTO conversation_checks (channel_account_id, conversation_external_id,
+                                         checked_at, recheck_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT (channel_account_id, conversation_external_id) DO UPDATE SET
+            checked_at = MAX(checked_at, excluded.checked_at),
+            recheck_at = CASE
+                WHEN excluded.recheck_at IS NOT NULL THEN excluded.recheck_at
+                WHEN recheck_at > excluded.checked_at THEN recheck_at
+                ELSE NULL
+            END
+        """,
+        (channel_account_id, conversation_external_id, checked_at, recheck_at),
+    )
+
+
+def postpone_recheck(
+    conn: sqlite3.Connection, channel_account_id: int, conversation_external_id: str, now: str
+) -> None:
+    """A re-read failed: try again ``QUIET_PERIOD`` later instead of at once."""
+    conn.execute(
+        """
+        UPDATE conversation_checks SET recheck_at = ?
+        WHERE channel_account_id = ? AND conversation_external_id = ?
+        """,
+        (to_db_time(_parse(now) + QUIET_PERIOD), channel_account_id, conversation_external_id),
+    )
+
+
+def due_rechecks(conn: sqlite3.Connection, channel_account_id: int, now: str) -> list[str]:
+    """Conversations of an account that have to be re-read now, the most overdue first."""
+    rows = conn.execute(
+        """
+        SELECT conversation_external_id FROM conversation_checks
+        WHERE channel_account_id = ? AND recheck_at IS NOT NULL AND recheck_at <= ?
+        ORDER BY recheck_at
+        """,
+        (channel_account_id, now),
+    ).fetchall()
+    return [row["conversation_external_id"] for row in rows]
+
+
+def last_queued_conversation(
+    conn: sqlite3.Connection, channel_account_id: int, conversation_external_id: str
+) -> ChannelConversation | None:
+    """The conversation as it was last read, to queue what a re-read finds.
+
+    A re-read reads one conversation directly, without the list that gives its
+    title and participants, so they are taken from the last queued message.
+    """
+    row = conn.execute(
+        """
+        SELECT payload FROM inbound_queue
+        WHERE channel_account_id = ? AND conversation_external_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (channel_account_id, conversation_external_id),
+    ).fetchone()
+    return decode_payload(row["payload"])[0] if row else None
+
+
+def _parse(db_time: str) -> datetime:
+    return datetime.fromisoformat(db_time)

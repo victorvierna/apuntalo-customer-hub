@@ -19,7 +19,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB_PATH = REPO_ROOT / "storage" / "apuntalo-marketing-platform.db"
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # STRICT tables require SQLite 3.37 or newer, and json_valid() (used to check
 # routing_decisions.scores) is built in from 3.38.
@@ -125,7 +125,7 @@ CREATE TABLE inbound_queue (
   is_backfill               INTEGER NOT NULL DEFAULT 0 CHECK (is_backfill IN (0, 1)),
   payload                   TEXT NOT NULL CHECK (json_valid(payload)),
   status                    TEXT NOT NULL DEFAULT 'pending'
-                            CHECK (status IN ('pending', 'processing', 'done', 'failed')),
+                            CHECK (status IN ('pending', 'done', 'failed')),
   attempts                  INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
   error                     TEXT,
   enqueued_at               TEXT NOT NULL,
@@ -134,6 +134,14 @@ CREATE TABLE inbound_queue (
   UNIQUE (channel_account_id, message_external_id),
   CHECK (status = 'pending' OR started_at IS NOT NULL),
   CHECK (status NOT IN ('done', 'failed') OR finished_at IS NOT NULL)
+) STRICT;
+
+CREATE TABLE conversation_checks (
+  channel_account_id        INTEGER NOT NULL REFERENCES channel_accounts(id),
+  conversation_external_id  TEXT NOT NULL,
+  checked_at                TEXT NOT NULL,
+  recheck_at                TEXT,
+  PRIMARY KEY (channel_account_id, conversation_external_id)
 ) STRICT;
 
 CREATE TABLE run_messages (
@@ -240,7 +248,7 @@ CREATE INDEX idx_run_messages_msg    ON run_messages(message_id);
 CREATE INDEX idx_queue_pending       ON inbound_queue(channel_account_id, conversation_external_id,
                                                       enqueued_at)
                                      WHERE status = 'pending';
-CREATE INDEX idx_queue_processing    ON inbound_queue(started_at) WHERE status = 'processing';
+CREATE INDEX idx_checks_due         ON conversation_checks(recheck_at) WHERE recheck_at IS NOT NULL;
 CREATE INDEX idx_model_calls_run     ON model_calls(run_id);
 CREATE INDEX idx_summaries_conv      ON conversation_summaries(conversation_id, created_at);
 CREATE INDEX idx_contacts_person     ON contacts(person_id);
