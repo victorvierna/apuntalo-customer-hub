@@ -18,6 +18,8 @@ necesite intervención humana se deriva a Bárbara (equipo de Apúntalo).
 
 ## Estructura
 - `data/faqs/` — base de conocimiento (FAQ oficiales). Nunca datos reales de clientes.
+  - `ayuda/` — guías de ayuda de Apúntalo en Markdown: lo único que indexa el RAG.
+  - `evaluacion-ayuda/` — preguntas con respuesta esperada para evaluar el RAG. **Nunca se indexa.**
 - `docker/` — instrucciones para arrancar todo en cualquier máquina.
 - `env/` — secretos locales (tokens, API keys). Git lo ignora.
 - `modules/`
@@ -28,7 +30,8 @@ necesite intervención humana se deriva a Bárbara (equipo de Apúntalo).
   - `logging/` — registra cada mensaje, respuesta, modelo, coste y derivación para depurar y medir el MVP.
   - `models/` — clientes de los modelos de IA; el router decide cuál usar.
   - `platform/` — dashboard interno: bandeja de conversaciones y gestión de la derivación.
-  - `rag/` — busca en `data/faqs/` la información para responder; si no la encuentra, devuelve vacío.
+  - `rag/` — busca en `data/faqs/ayuda/` la información para responder; si no la encuentra, devuelve
+    vacío. Documentado en `docs/modules/rag.md`.
   - `router/` — escoge el mejor modelo para contestar según la entrada.
 - `shared/` — código usado por 2 o más módulos: `config/`, `db/`, `types/`, `utils/`.
   - `db/` — acceso a la base de datos SQLite: todo el SQL va aquí. `init_db.py` crea el esquema;
@@ -47,6 +50,7 @@ necesite intervención humana se deriva a Bárbara (equipo de Apúntalo).
 - Crear la base de datos: `python shared/db/init_db.py` (solo usa la librería estándar).
 - Tests: `python -m unittest` desde la raíz del repo (usa `unittest`, de la librería estándar).
 - Instalar instagram-cli con nuestro parche: `modules/channels/instagram/install.sh`.
+- Evaluar la búsqueda del RAG: `python -m modules.rag.evaluate` (`--failures` para ver los fallos).
 - TODO: el resto (instalación, ejecución) está pendiente. No inventes esos comandos.
 
 ## Git y Pull Requests
