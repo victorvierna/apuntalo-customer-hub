@@ -8,9 +8,10 @@ from datetime import timedelta
 
 from modules.channels.instagram.adapter import MessagePage
 from modules.channels.instagram.errors import InstagramAuthError, InstagramCliError
-from modules.channels.instagram.poller import backfill_flags, poll_once
+from modules.channels.instagram.poller import backfill_flags, poll_once, run_due_rechecks
 from modules.gateway import run_once
-from modules.gateway.worker import BURST_WINDOW
+from shared.db.connection import to_db_time
+from shared.db.queue import MAX_WAIT, QUIET_PERIOD, due_rechecks
 from shared.db.tests.helpers import T0, DatabaseTestCase, conversation, message
 from shared.types.gateway import GatewayResult
 from shared.types.messages import Direction
@@ -19,12 +20,35 @@ THREAD_A = "340282366841710300000000000000000000001"
 THREAD_B = "340282366841710300000000000000000000002"
 
 
+CALL_TIME = timedelta(seconds=6)
+"""What each instagram-cli command takes in practice."""
+
+
 class FakeAdapter:
-    """Answers like InstagramAdapter from what the test puts in ``threads``."""
+    """Answers like InstagramAdapter from what the test puts in ``threads``.
+
+    It also keeps a simulated clock (``now``): every call takes ``CALL_TIME``,
+    and messages added with ``schedule`` appear once the clock reaches them.
+    """
 
     def __init__(self):
         self.threads = {}  # external_id -> (ChannelConversation, [ChannelMessage])
         self.failing = {}  # external_id -> exception raised by read_messages
+        self.scheduled = []  # (thread_id, ChannelMessage) not written yet
+        self.now = T0
+
+    def clock(self):
+        return self.now
+
+    def schedule(self, thread_id, *messages):
+        """The contact will write these messages at their ``created_at``."""
+        self.scheduled.extend((thread_id, m) for m in messages)
+
+    def _call(self):
+        for item in [i for i in self.scheduled if i[1].created_at <= self.now]:
+            self.scheduled.remove(item)
+            self.write(item[0], item[1])
+        self.now += CALL_TIME
 
     def add(self, thread_id, *messages, participants=("cliente.prueba",)):
         conv = conversation(thread_id=thread_id, participants=participants)
@@ -34,15 +58,17 @@ class FakeAdapter:
         self.threads[thread_id][1].extend(messages)
 
     def list_conversations(self, limit=20):
+        self._call()
         return [conv for conv, _ in self.threads.values()][:limit]
 
     def read_messages(self, conversation_id, limit=20):
         return self.read_page(conversation_id, limit).messages
 
     def read_page(self, conversation_id, limit=20, cursor=None):
+        self._call()
         if conversation_id in self.failing:
             raise self.failing[conversation_id]
-        messages = self.threads[conversation_id][1]
+        messages = sorted(self.threads[conversation_id][1], key=lambda m: m.created_at)
         end = len(messages) if cursor is None else int(cursor)
         start = max(0, end - limit)
         return MessagePage(
@@ -51,13 +77,13 @@ class FakeAdapter:
         )
 
 
-def msg(external_id, minutes, direction=Direction.IN, thread_id=THREAD_A, body="hola"):
+def msg(external_id, minutes, direction=Direction.IN, thread_id=THREAD_A, body="hola", seconds=0):
     return message(
         external_id,
         body=body,
         direction=direction,
         thread_id=thread_id,
-        created_at=T0 + timedelta(minutes=minutes),
+        created_at=T0 + timedelta(minutes=minutes, seconds=seconds),
     )
 
 
@@ -89,8 +115,10 @@ class PollerTestCase(DatabaseTestCase):
         self.account = self.add_account()
         self.adapter = FakeAdapter()
 
-    def poll(self, at=T0):
-        return poll_once(self.conn, self.adapter, self.account, at)
+    def poll(self, at=None):
+        if at is not None:
+            self.adapter.now = at
+        return poll_once(self.conn, self.adapter, self.account, self.adapter.clock)
 
     def queued(self):
         """``{message_external_id: is_backfill}`` of everything in the queue."""
@@ -141,7 +169,7 @@ class PollerTest(PollerTestCase):
     def test_the_account_stays_synced_after_the_queue_is_cleaned(self):
         self.adapter.add(THREAD_A, msg("a1", 0))
         self.poll()
-        run_once(self.conn, T0 + BURST_WINDOW)
+        run_once(self.conn, T0 + MAX_WAIT)
         self.conn.execute("DELETE FROM inbound_queue")
 
         self.adapter.write(THREAD_A, msg("a2", 5))
@@ -168,11 +196,66 @@ class PollerTest(PollerTestCase):
         self.assertEqual(result.failed_conversations, [THREAD_A])
         self.assertEqual(self.queued(), {"b1": True})
 
+    def test_a_reread_that_fails_is_postponed(self):
+        self.adapter.add(THREAD_A, msg("a0", -60))
+        self.poll(at=T0 - timedelta(minutes=30))
+        self.adapter.write(THREAD_A, msg("a1", 0))
+        self.poll(at=T0)  # finds a1: re-read in QUIET_PERIOD
+        self.adapter.failing[THREAD_A] = InstagramCliError("timeout")
+        self.adapter.now += QUIET_PERIOD
+
+        with self.assertLogs("modules.channels.instagram.poller", "ERROR"):
+            result = run_due_rechecks(self.conn, self.adapter, self.account, self.adapter.clock)
+
+        self.assertEqual(result.failed_conversations, [THREAD_A])
+        now = self.adapter.now
+        self.assertEqual(due_rechecks(self.conn, self.account, to_db_time(now)), [])
+        later = to_db_time(now + QUIET_PERIOD)
+        self.assertEqual(due_rechecks(self.conn, self.account, later), [THREAD_A])
+
     def test_an_expired_session_stops_the_pass(self):
         self.adapter.add(THREAD_A, msg("a1", 0))
         self.adapter.failing[THREAD_A] = InstagramAuthError("login_required")
         with self.assertRaises(InstagramAuthError):
             self.poll()
+
+
+class BurstTest(PollerTestCase):
+    """Re-reads: a query written in several messages is answered once."""
+
+    def setUp(self):
+        super().setUp()
+        # Ten conversations, like the real inbox: a whole pass takes about a minute.
+        self.adapter.add(THREAD_A, msg("a0", -60))
+        for n in range(9):
+            thread = f"34028236684171030000000000000000000010{n}"
+            self.adapter.add(thread, msg(f"x{n}", -60, thread_id=thread))
+        self.poll(at=T0 - timedelta(minutes=30))  # first pass: history
+        run_once(self.conn, self.adapter.now)
+        self.adapter.now = T0
+
+    def run_reader_and_gateway(self, until):
+        """The reader in a loop, and the gateway after every pass."""
+        decisions = []
+        while self.adapter.now < until:
+            poll_once(self.conn, self.adapter, self.account, self.adapter.clock)
+            decisions += [(d, self.adapter.now) for d in run_once(self.conn, self.adapter.now)]
+        return decisions
+
+    def test_messages_written_seconds_apart_are_one_burst(self):
+        self.adapter.schedule(
+            THREAD_A,
+            msg("a1", 0, seconds=5, body="hola"),
+            msg("a2", 0, seconds=20, body="una duda"),
+            msg("a3", 0, seconds=40, body="¿cuánto cuesta?"),
+        )
+
+        decisions = self.run_reader_and_gateway(until=T0 + timedelta(minutes=4))
+
+        [(decision, decided_at)] = decisions
+        self.assertEqual(len(decision.message_ids), 3)
+        # Confirmed by a re-read, not by the safety net.
+        self.assertLess(decided_at - (T0 + timedelta(seconds=40)), MAX_WAIT)
 
 
 class ReaderAndGatewayTest(PollerTestCase):
@@ -186,13 +269,15 @@ class ReaderAndGatewayTest(PollerTestCase):
             msg("a3", 2, body="¡Gracias!"),
         )
         self.poll()
-        self.assertEqual(run_once(self.conn, T0 + BURST_WINDOW), [])
+        self.assertEqual(run_once(self.conn, T0 + MAX_WAIT), [])
         self.assertEqual(self.count("messages"), 3)
 
         self.adapter.write(THREAD_A, msg("a4", 60 * 24, body="¿Hay descuento?"))
-        later = T0 + timedelta(days=1)
-        self.poll(at=later)
-        [decision] = run_once(self.conn, later + BURST_WINDOW)
+        self.poll(at=T0 + timedelta(days=1))
+        self.assertEqual(run_once(self.conn, self.adapter.now), [])  # the burst may go on
+        self.adapter.now += QUIET_PERIOD
+        run_due_rechecks(self.conn, self.adapter, self.account, self.adapter.clock)
+        [decision] = run_once(self.conn, self.adapter.now)
 
         self.assertIs(decision.result, GatewayResult.ACCEPTED)
         self.assertEqual(len(decision.message_ids), 1)

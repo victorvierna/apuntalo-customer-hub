@@ -8,6 +8,14 @@ Every pass re-reads the most recent conversations. Messages that are already in
 the queue are not queued again (``UNIQUE``), so a re-read never looks like a new
 message and the reader does not need to remember where it stopped.
 
+**Bursts.** Contacts often write one query in several messages. When a read
+finds new messages from the contact, the reader reads that conversation again
+``QUIET_PERIOD`` later, and again while it keeps finding new ones. The gateway
+waits for a re-read that finds nothing new, so it answers the whole burst once
+(``shared/db/queue.py``). Due re-reads go before the next conversation of the
+pass, so they do not wait for the pass to end. Between passes, call
+``run_due_rechecks`` often.
+
 **History (``is_backfill``).** Everything is queued and stored, so the assistant
 has the whole conversation as context. What history means is "do not answer it
 as if it had just arrived" (decided on 2026-11-17):
@@ -20,19 +28,28 @@ as if it had just arrived" (decided on 2026-11-17):
   no reply of ours, so all of it is answered.
 - A conversation we already know: everything new is answered.
 
-How often ``poll_once`` runs, and how it is started, is still open
+How often the reader runs, and how it is started, is still open
 (``gateway.md``, open decision 1).
 """
 
 import logging
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from shared.db.connection import to_db_time, transaction
-from shared.db.queue import enqueue, has_synced, is_known_conversation, last_known_message_id
-from shared.types.messages import ChannelMessage, Direction
+from shared.db.queue import (
+    due_rechecks,
+    enqueue,
+    has_synced,
+    is_known_conversation,
+    last_known_message_id,
+    last_queued_conversation,
+    mark_checked,
+    postpone_recheck,
+)
+from shared.types.messages import ChannelConversation, ChannelMessage, Direction
 
 from .adapter import INBOX_MAX, InstagramAdapter
 from .errors import InstagramAuthError, InstagramCliError, InstagramCliNotFoundError
@@ -52,13 +69,22 @@ With 20 messages a page, this is 200 messages of margin. If the anchor is still 
 found, the conversation is reported as a gap instead of reading forever.
 """
 
+Clock = Callable[[], datetime]
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
 
 @dataclass(slots=True)
 class PollResult:
-    """What one pass did, for logs and the dashboard."""
+    """What the reader did, for logs and the dashboard."""
 
-    first_sync: bool
+    first_sync: bool = False
     conversations_read: int = 0
+    rechecks: int = 0
+    """Re-reads of conversations with a burst going on."""
+
     messages_queued: int = 0
     groups_skipped: int = 0
     failed_conversations: list[str] = field(default_factory=list)
@@ -76,21 +102,18 @@ def poll_once(
     conn: sqlite3.Connection,
     adapter: InstagramAdapter,
     channel_account_id: int,
-    now: datetime | None = None,
+    clock: Clock = _utc_now,
 ) -> PollResult:
-    """Reads the recent conversations of one account and queues their messages.
+    """One pass over the recent conversations of one account, plus due re-reads.
 
     ``adapter`` must be logged in to the account of ``channel_account_id``.
-
-    Each conversation is queued in its own transaction, so the gateway never
-    sees half of what was read from it.
+    ``clock`` gives the current time; only tests change it.
 
     Raises:
         InstagramAuthError: the session expired; a person has to log in again.
         InstagramCliNotFoundError: instagram-cli is not installed.
         InstagramCliError: the inbox itself could not be read.
     """
-    now_text = to_db_time(now or datetime.now(UTC))
     # Decided once, before queuing anything: after the first conversation of
     # the first pass, the account would already look synced.
     result = PollResult(first_sync=not has_synced(conn, channel_account_id))
@@ -105,6 +128,7 @@ def poll_once(
         )
 
     for conversation in conversations:
+        run_due_rechecks(conn, adapter, channel_account_id, clock, result)
         # Group conversations are not in the MVP.
         if len(conversation.participants) > 1:
             result.groups_skipped += 1
@@ -112,42 +136,98 @@ def poll_once(
         known = not result.first_sync and is_known_conversation(
             conn, channel_account_id, conversation.external_id
         )
-        anchor = (
-            last_known_message_id(conn, channel_account_id, conversation.external_id)
-            if known
-            else None
+        _read_and_queue(
+            conn, adapter, channel_account_id, conversation, clock, result,
+            first_sync=result.first_sync, known=known,
         )
-        try:
-            messages, has_older = _read_back_to(adapter, conversation.external_id, anchor)
-        except (InstagramAuthError, InstagramCliNotFoundError):
-            raise
-        except InstagramCliError:
-            # One conversation failing does not stop the others.
-            logger.exception(
-                "Could not read conversation %s of account %s",
-                conversation.external_id,
-                channel_account_id,
-            )
-            result.failed_conversations.append(conversation.external_id)
-            continue
 
-        if anchor is not None and has_older and not any(m.external_id == anchor for m in messages):
-            result.gap_conversations.append(conversation.external_id)
-            logger.warning(
-                "Conversation %s of account %s: the last message we had is not in the %d pages read; messages may be lost.",
-                conversation.external_id,
-                channel_account_id,
-                MAX_PAGES,
-            )
-
-        flags = backfill_flags(messages, first_sync=result.first_sync, known=known)
-        with transaction(conn):
-            for message, is_backfill in zip(messages, flags, strict=True):
-                if enqueue(conn, channel_account_id, conversation, message, now_text, is_backfill):
-                    result.messages_queued += 1
-        result.conversations_read += 1
-
+    run_due_rechecks(conn, adapter, channel_account_id, clock, result)
     return result
+
+
+def run_due_rechecks(
+    conn: sqlite3.Connection,
+    adapter: InstagramAdapter,
+    channel_account_id: int,
+    clock: Clock = _utc_now,
+    result: PollResult | None = None,
+) -> PollResult:
+    """Re-reads the conversations of an account whose re-read is due.
+
+    Raises the same errors as ``poll_once`` for an expired session or a
+    missing instagram-cli; any other failure postpones that re-read.
+    """
+    result = result if result is not None else PollResult()
+    for conversation_id in due_rechecks(conn, channel_account_id, to_db_time(clock())):
+        conversation = last_queued_conversation(conn, channel_account_id, conversation_id)
+        if conversation is None:
+            # Its queue rows were cleaned up: nothing to wait for any more.
+            with transaction(conn):
+                mark_checked(conn, channel_account_id, conversation_id, to_db_time(clock()), False)
+            continue
+        result.rechecks += 1
+        _read_and_queue(
+            conn, adapter, channel_account_id, conversation, clock, result,
+            first_sync=False, known=True,
+        )
+    return result
+
+
+def _read_and_queue(
+    conn: sqlite3.Connection,
+    adapter: InstagramAdapter,
+    channel_account_id: int,
+    conversation: ChannelConversation,
+    clock: Clock,
+    result: PollResult,
+    *,
+    first_sync: bool,
+    known: bool,
+) -> None:
+    """Reads one conversation back to its anchor and queues what is new, with its check,
+    in one transaction."""
+    # The start of the read: everything sent before it is in what we read.
+    read_at = to_db_time(clock())
+    anchor = (
+        last_known_message_id(conn, channel_account_id, conversation.external_id)
+        if known
+        else None
+    )
+    try:
+        messages, has_older = _read_back_to(adapter, conversation.external_id, anchor)
+    except (InstagramAuthError, InstagramCliNotFoundError):
+        raise
+    except InstagramCliError:
+        # One conversation failing does not stop the others.
+        logger.exception(
+            "Could not read conversation %s of account %s",
+            conversation.external_id,
+            channel_account_id,
+        )
+        result.failed_conversations.append(conversation.external_id)
+        with transaction(conn):
+            postpone_recheck(conn, channel_account_id, conversation.external_id, read_at)
+        return
+
+    if anchor is not None and has_older and not any(m.external_id == anchor for m in messages):
+        result.gap_conversations.append(conversation.external_id)
+        logger.warning(
+            "Conversation %s of account %s: the last message we had is not in the %d pages read; messages may be lost.",
+            conversation.external_id,
+            channel_account_id,
+            MAX_PAGES,
+        )
+
+    flags = backfill_flags(messages, first_sync=first_sync, known=known)
+    found_new_incoming = False
+    with transaction(conn):
+        for message, is_backfill in zip(messages, flags, strict=True):
+            if enqueue(conn, channel_account_id, conversation, message, read_at, is_backfill):
+                result.messages_queued += 1
+                if not is_backfill and message.direction is Direction.IN:
+                    found_new_incoming = True
+        mark_checked(conn, channel_account_id, conversation.external_id, read_at, found_new_incoming)
+    result.conversations_read += 1
 
 
 def _read_back_to(
