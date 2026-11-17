@@ -58,9 +58,13 @@ y concentraremos el acceso a datos en un único sitio del código.
 
 - **Claves primarias:** `id INTEGER PRIMARY KEY` en todas las tablas. En SQLite es el
   identificador interno de fila (`rowid`), así que es lo más eficiente y es autoincremental.
-- **Fechas:** `TEXT` en ISO-8601 y siempre en UTC (`2026-11-10T14:30:00Z`). SQLite no tiene
-  un tipo fecha. ISO-8601 se lee a simple vista al depurar, se ordena bien como texto y lo
-  entienden las funciones de fecha de SQLite. La conversión a hora local se hace solo al
+- **Fechas:** `TEXT` en ISO-8601, siempre en UTC y siempre con milisegundos
+  (`2026-11-10T14:30:00.000Z`). SQLite no tiene un tipo fecha. ISO-8601 se lee a simple vista
+  al depurar, se ordena bien como texto y lo entienden las funciones de fecha de SQLite. Los
+  milisegundos hacen falta porque Instagram los da y varios mensajes de una ráfaga pueden caer
+  en el mismo segundo. El formato tiene que ser siempre el mismo: si se mezclaran,
+  `…:00Z` quedaría ordenado después de `…:00.500Z`. Por eso todas las fechas se escriben con
+  `shared/db/connection.py` (`to_db_time`). La conversión a hora local se hace solo al
   mostrarla en el dashboard.
 - **Booleanos:** `INTEGER` con valores `0` / `1` (SQLite no tiene tipo booleano).
 - **Dinero:** `INTEGER` en millonésimas de dólar (*micros*). Sumar números en coma flotante
@@ -462,23 +466,29 @@ instagram-cli ──> lector ──encola──> inbound_queue ──coge──>
 Ciclo de vida de cada fila:
 
 ```
-pending ──(el gateway la coge)──> processing ──> done
-   ^                                  │
-   └──(colgada demasiado tiempo)──────┴──(varios intentos)──> failed
+pending ──(el gateway procesa la ráfaga)──> done
+   │
+   └──(falla; attempts + 1, sigue pending)── … ──(3 intentos)──> failed
 ```
 
-Funcionamiento del gateway, en bucle:
+Funcionamiento del gateway, en bucle (`modules/gateway/worker.py`):
 
-1. **Rescatar las filas colgadas:** las que llevan demasiado tiempo en `processing` (el proceso
-   se cayó a medias) vuelven a `pending` con `attempts + 1`. Tras varios intentos pasan a
-   `failed` y el dashboard las muestra.
-2. **Buscar conversaciones listas:** las que tienen filas `pending` y llevan unos segundos sin
+1. **Buscar conversaciones listas:** las que tienen filas `pending` y llevan unos segundos sin
    mensajes nuevos (ventana de la ráfaga, decisión abierta 12).
-3. **Coger la ráfaga entera** en una sola sentencia
-   (`UPDATE … SET status = 'processing' … RETURNING`), así dos procesos del gateway nunca cogen
-   lo mismo.
-4. **Procesarla:** guarda cada mensaje sin duplicados y crea **un** procesamiento para todos los
-   mensajes entrantes nuevos (`run_messages`). Al terminar, marca las filas `done`.
+2. **Procesar cada ráfaga en una sola transacción** (`BEGIN IMMEDIATE`): leer sus filas,
+   guardar cada mensaje sin duplicados, crear **un** procesamiento para todos los mensajes
+   entrantes nuevos (`run_messages`) y marcar las filas `done`. El bloqueo de escritura evita
+   que dos procesos del gateway procesen la misma ráfaga.
+3. **Si falla**, se deshace todo (los mensajes no quedan guardados) y las filas suman un
+   intento. Tras varios intentos pasan a `failed` y el dashboard las muestra.
+
+**El estado `processing` no se usa** (ni su índice `idx_queue_processing`). La primera versión
+del diseño marcaba la ráfaga como `processing` antes de procesarla. Si el gateway se caía a
+mitad, el reintento encontraba los mensajes ya guardados, los tomaba por relecturas y el
+cliente se quedaba sin respuesta. Con una sola transacción, una caída lo deshace todo y el
+reintento los ve como nuevos. Lo que queda por contestar no depende de la cola, sino de los
+procesamientos abiertos (`processing_runs.finished_at` vacío; ver `gateway.md`, sección 2).
+`processing` se puede quitar del esquema en una versión futura.
 
 Ejemplo: Ana escribe "hola", "una duda" y "¿cuánto cuesta el curso?" en pocos segundos. El
 lector los encola en una o dos pasadas. El gateway espera a que la conversación lleve 8 s sin
@@ -507,10 +517,10 @@ la decisión abierta 14.
 | `is_backfill` | INTEGER (booleano), por defecto `0` | `1` = historial de la primera sincronización: se guarda, pero no se contesta. |
 | `payload` | TEXT (JSON) | `ChannelConversation` + `ChannelMessage` tal como los da el adaptador. Un `CHECK` exige JSON válido. |
 | `status` | TEXT + CHECK | `pending`, `processing`, `done` o `failed` (ver ciclo de vida). |
-| `attempts` | INTEGER, por defecto `0` | Veces que se ha rescatado tras quedarse colgada. Evita reintentar sin fin. |
+| `attempts` | INTEGER, por defecto `0` | Intentos fallidos de procesar la ráfaga. Evita reintentar sin fin: al llegar al máximo, la fila pasa a `failed`. |
 | `error` | TEXT, opcional | Último error, para depurar las filas `failed`. |
 | `enqueued_at` | TEXT | Cuándo se encoló, **con nuestro reloj**. Se usa para la ventana de la ráfaga porque es fiable; la fecha del canal puede llegar con retraso. |
-| `started_at` | TEXT, opcional | Cuándo la cogió el gateway. Obligatorio salvo en `pending`. Sirve para detectar filas colgadas. |
+| `started_at` | TEXT, opcional | Cuándo la procesó el gateway. Obligatorio salvo en `pending`. |
 | `finished_at` | TEXT, opcional | Cuándo terminó. Obligatorio en `done` y `failed`. |
 
 **Diferencia con `run_messages`:** la cola es **lo que hay que hacer** (operativa: las filas
@@ -530,7 +540,7 @@ diseñará con el envío de respuestas (`gateway.md`, sección 2).
 | `run_messages(message_id)` | Ir de un mensaje a cómo se procesó. Ir de un procesamiento a sus mensajes ya lo cubre la clave primaria `(run_id, message_id)`. |
 | `routing_decisions(run_id, phase)` | Ir de un procesamiento a las fases del enrutador. Lo crea automáticamente el `UNIQUE (run_id, phase)`. |
 | `inbound_queue(channel_account_id, conversation_external_id, enqueued_at) WHERE status = 'pending'` | La consulta del gateway en cada vuelta: qué conversaciones tienen mensajes pendientes y cuándo llegó el último. Índice parcial: solo contiene lo pendiente, así sigue siendo pequeño aunque la cola acumule filas `done`. |
-| `inbound_queue(started_at) WHERE status = 'processing'` | Rescatar las filas colgadas. |
+| `inbound_queue(started_at) WHERE status = 'processing'` | Sin uso: el gateway no usa el estado `processing` (ver 6.14). Se puede quitar en una versión futura. |
 | `model_calls(run_id)` | Ir de un procesamiento a sus llamadas y su coste. |
 | `conversation_summaries(conversation_id, created_at)` | Ver los resúmenes de un ticket en orden. |
 | `contacts(person_id)` | Ir de una persona a todas sus identidades (y de ahí a sus conversaciones). |
@@ -886,7 +896,7 @@ se basa en una FAQ.
 11. **Qué es "realizar petición" (`action = 'request'`):** no está definido qué hace el
     sistema en ese caso. Por eso `request` no tiene `tier` obligatorio.
 12. **Tiempos de la cola:** cuánto espera el gateway sin mensajes nuevos antes de procesar la
-    ráfaga (propuesta inicial: 8 s), cuándo se considera colgada una fila (propuesta: 5 min) y
+    ráfaga (propuesta inicial: 8 s, `BURST_WINDOW` en `modules/gateway/worker.py`) y
     cuántos intentos se permiten (propuesta: 3). Son decisiones del código, no del esquema. La
     ventana depende también del intervalo del lector (`gateway.md`, decisión abierta 1).
 13. **Limpieza de la cola:** cada cuánto se borran las filas `done` antiguas de

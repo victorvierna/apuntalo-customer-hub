@@ -1,7 +1,7 @@
 # Arquitectura del gateway (`modules/gateway/`)
 
-> **Estado:** propuesta para revisión (borrador). Todavía no hay código.
-> **Fecha:** 2026-11-16
+> **Estado:** primera versión implementada en `modules/gateway/` (sin lector ni enrutador).
+> **Fecha:** 2026-11-16 (actualizado el 2026-11-17 con el código)
 > **Depende de:** esquema v4 de la base de datos (`people`, `contacts`, `blocks`,
 > `inbound_queue`, `run_messages`, `routing_decisions`), ver `docs/architecture/database.md`.
 > **Alcance:** qué hace el gateway, en qué orden y qué guarda. No cubre el enrutador, el RAG
@@ -109,11 +109,24 @@ aparecían al combinar la cola con las ráfagas y con la primera sincronización
   ("hola" / "una duda" / "¿cuánto cuesta?"). El gateway no coge mensajes sueltos, sino **todos
   los `pending` de una conversación** cuando esa conversación lleva unos segundos sin mensajes
   nuevos (propuesta: 8 s, contados con `enqueued_at`). Así se contesta una sola vez.
-- Para coger trabajo, el gateway marca la ráfaga como `processing` en una sola sentencia
-  (`UPDATE … WHERE status = 'pending' … RETURNING`). Así dos procesos del gateway nunca cogen
-  el mismo mensaje.
-- Un mensaje que lleva demasiado tiempo en `processing` (el proceso se cayó) vuelve a
-  `pending`. Tras varios fallos (`attempts`) pasa a `failed` y el dashboard lo muestra.
+- **Cada ráfaga se procesa en una sola transacción** (`BEGIN IMMEDIATE`): leer sus filas,
+  guardar los mensajes, decidir, crear el procesamiento y marcar las filas como `done`. Como
+  dentro no se llama a ningún modelo ni a Instagram, es muy corta. `BEGIN IMMEDIATE` coge el
+  bloqueo de escritura al empezar, así dos procesos del gateway nunca procesan la misma ráfaga.
+- **Por qué así (y no marcando primero la ráfaga como `processing`):** si el gateway se cae a
+  mitad, la base de datos deshace todo y las filas siguen `pending`, con sus mensajes sin
+  guardar. Al reintentar, los mensajes se ven como nuevos y se contestan. Con el estado
+  intermedio `processing`, un reintento encontraba los mensajes ya guardados, los tomaba por
+  relecturas y el cliente se quedaba sin respuesta. Por eso el gateway no usa `processing` (el
+  valor sigue en el `CHECK` del esquema, sin uso).
+- **Lo que queda por contestar no depende de la cola.** Una ráfaga aceptada deja un
+  procesamiento abierto (`processing_runs.finished_at` vacío) en la misma transacción en la
+  que se marca `done`. Si el sistema se cae mientras se piensa o se envía la respuesta, al
+  reiniciar se retoma desde esos procesamientos abiertos (`shared/db/runs.py`,
+  `unfinished_accepted_runs`).
+- Si una ráfaga falla (p. ej. un `payload` mal formado), no se guarda nada y sus filas suman un
+  intento (`attempts`). Tras 3 intentos pasan a `failed` y el dashboard las muestra. Un fallo
+  no frena las ráfagas de otras conversaciones.
 - **Las respuestas** pueden seguir el mismo patrón en sentido contrario (una cola de salida
   que un script envía con instagram-cli). Se diseñará con el envío de respuestas.
 
@@ -195,10 +208,14 @@ mensaje.
 Los pasos 1 a 4 se hacen **por mensaje**; los pasos 5 a 8, **una vez por ráfaga**: todos los
 mensajes de una ráfaga son de la misma conversación y, por tanto, de la misma persona.
 
-Los pasos 2 a 4, y la creación de la fila de `processing_runs`, van en **una única
-transacción** (`BEGIN IMMEDIATE`). Así no quedan datos a medias si el proceso se cae, y dos
-lecturas del mismo mensaje a la vez no crean dos personas ni dos contactos. La transacción es
-corta: dentro no se llama a ningún modelo ni a Instagram.
+Los pasos 0 a 8 de una ráfaga van en **una única transacción** (`BEGIN IMMEDIATE`, ver la
+sección 2). Así no quedan datos a medias si el proceso se cae, y dos lecturas del mismo mensaje
+a la vez no crean dos personas ni dos contactos. La transacción es corta: dentro no se llama a
+ningún modelo ni a Instagram.
+
+En el código, los pasos 1 a 4 están en `ingest.py` (`store_burst`) y los pasos 5 a 7 en
+`checks.py`. Los mensajes de la ráfaga se guardan en el orden en que se enviaron
+(`created_at` del canal), no en el que se encolaron.
 
 ### 4.1 `ignore_outgoing`
 
@@ -206,6 +223,21 @@ El adaptador lee también los mensajes que enviamos nosotros (el asistente, o B�
 app de Instagram). Se guardan en `messages` (`direction = 'out'`, sin duplicados) para que el
 hilo del dashboard esté completo, pero no se procesan: no generan `processing_runs`. Es lo que
 ya dice `modules/handoff/policy.py` (`Direction.OUT` → `STORE_ONLY`).
+
+Un saliente que no tenemos guardado no lo envió el asistente (el asistente guardará lo que
+envíe), así que lo escribió una persona desde la app: se guarda con `author = 'human'`.
+
+**Salientes a personas que no están en la base de datos (decidido el 2026-11-17): fuera del
+MVP.** Para crear una conversación hace falta su contacto, y en un saliente el remitente
+somos nosotros (`inbox` solo da nombres de usuario, no el `userId`). Pasa si escribimos
+primero a alguien que nunca nos ha escrito, o con el historial de un hilo que empezamos
+nosotros. La captación de clientes no está en el MVP, así que esas filas se marcan `done` sin
+guardar el mensaje y con una nota en `inbound_queue.error`. Si la persona contesta después, se
+crea la conversación con su mensaje. Después del MVP, la idea es exportar las conversaciones
+que ya existen como base de datos inicial.
+
+Las conversaciones de grupo, que no deberían llegar porque el lector no las encola, se tratan
+igual: se marcan `done` sin guardar nada y con una nota.
 
 ### 4.2 `resolve_identity` — ¿quién es y es la primera vez?
 
@@ -384,22 +416,29 @@ ORDER BY cs.created_at DESC;
 | `confidence`, `scores`, `threshold`, `router_version`, `latency_ms` | Cómo se tomó la decisión, por fase (`routing_decisions`) |
 | Propuesta de bloqueo | Opcional, con motivo: una fila `blocks` con `source = 'router'` y `status = 'proposed'` |
 
-## 8. Estructura de código propuesta
+## 8. Estructura del código
 
-Se confirmará en la PR del código. Todo con la librería estándar (`docs/decisions/0001-python.md`).
+Todo con la librería estándar (`docs/decisions/0001-python.md`).
 
 | Ruta | Qué contiene |
 |---|---|
-| `modules/channels/instagram/poller.py` | El lector: cada cierto tiempo lee cada cuenta con el adaptador y encola los mensajes (sección 2). |
-| `modules/gateway/worker.py` | Lee de la cola los mensajes pendientes y los pasa por el pipeline. |
-| `modules/gateway/pipeline.py` | La lista de comprobaciones y el bucle que las ejecuta. |
-| `modules/gateway/checks.py` | Una función por comprobación (sección 4). |
-| `modules/gateway/tests/` | Un test por comprobación y uno del flujo completo, con una base de datos SQLite temporal. |
-| `shared/types/gateway.py` | `InboundMessage` (cuenta + conversación + mensaje), `GatewayContext`, `GatewayResult` (los mismos valores que el `CHECK` de `gateway_result`) y `GatewayDecision`. En `shared/` porque los usan el gateway, el enrutador y el logging. |
-| `shared/types/routing.py` | `RouteRequest` y `RouteDecision` (sección 7): el contrato entre el gateway y el enrutador. |
-| `shared/db/` | Acceso a `people`, `contacts`, `blocks`, `conversations`, `messages` e `inbound_queue`. El dashboard también lo usará (bloquear, fusionar personas, ver mensajes fallidos de la cola). |
+| `modules/gateway/worker.py` | `run_once()`: busca las conversaciones con la ráfaga lista y procesa cada una en su transacción. Aquí están la ventana de la ráfaga (`BURST_WINDOW`, 8 s) y los intentos (`MAX_ATTEMPTS`, 3). |
+| `modules/gateway/pipeline.py` | `process_burst()`: guarda la ráfaga, pasa las comprobaciones y crea el procesamiento (y la derivación, si hace falta). |
+| `modules/gateway/ingest.py` | Pasos 1 a 4: guardar la ráfaga (identidad, conversación y mensajes, sin duplicados). |
+| `modules/gateway/identity.py` | Sección 5: quién es y si es la primera vez. |
+| `modules/gateway/checks.py` | Pasos 5 a 7: una función por comprobación y la lista `CHECKS`. |
+| `modules/gateway/tests/` | Tests de la identidad y del flujo completo, con una base de datos SQLite temporal creada con `init_db`. |
+| `shared/types/gateway.py` | `GatewayResult` y `Outcome` (los mismos valores que los `CHECK` de `processing_runs`) y `GatewayDecision`. |
+| `shared/types/queue.py` | `QueuedMessage` y el formato JSON del `payload` de la cola (`encode_payload` / `decode_payload`), que comparten el lector y el gateway. |
+| `shared/db/` | Todo el SQL: `connection.py` (conexión, transacciones y formato de fechas), `queue.py`, `contacts.py` (personas, identidades y bloqueos), `conversations.py` (conversaciones, mensajes y derivaciones) y `runs.py` (procesamientos). |
 
-Ninguno de estos archivos puede importar nada de `modules/channels/`.
+Ningún archivo del gateway importa nada de `modules/channels/`.
+
+**Pendiente, en otras PR:**
+- `modules/channels/instagram/poller.py`, el lector que encola (sección 2).
+- `shared/types/routing.py` con `RouteRequest` y `RouteDecision` (sección 7), junto con el
+  enrutador. Mientras no exista, las ráfagas aceptadas quedan como procesamientos abiertos.
+- Cómo se arranca el gateway (decisión abierta 1). Hoy solo existe `run_once()`.
 
 ## 9. Decisiones abiertas
 
@@ -419,8 +458,13 @@ Ninguno de estos archivos puede importar nada de `modules/channels/`.
    - qué hace el gateway cuando llega un mensaje a una conversación cerrada: reabrirla o
      empezar una conversación nueva. Hoy solo puede haber una fila por hilo del canal
      (`UNIQUE (channel_account_id, external_id)`), así que reabrir es lo que encaja con el
-     esquema actual;
+     esquema actual. **Mientras se decide, el código la reabre** (`status = 'bot'`);
    - en ambos casos, el resumen archivado llega al enrutador como contexto previo (sección 7).
+4. **Respuesta enviada dos veces tras una caída.** Si el sistema se cae justo después de
+   enviar una respuesta y antes de cerrar su procesamiento, al reiniciar se retomaría y se
+   enviaría otra vez. Antes de reenviar hay que comprobar si la respuesta ya está en la
+   conversación (el adaptador tiene `is_delivered`). Es del envío de respuestas, no del
+   gateway.
 
 ### Decidido
 
@@ -435,6 +479,10 @@ Ninguno de estos archivos puede importar nada de `modules/channels/`.
   historial: `database.md`, decisión abierta 14.
 - ~~**Conversaciones de grupo**~~ **✅ (2026-11-16):** fuera del MVP. El lector no encola
   conversaciones con más de un participante, así que nunca llegan al gateway.
+- ~~**Caída a mitad de una ráfaga**~~ **✅ (2026-11-17):** cada ráfaga va en una sola
+  transacción, y lo que queda por contestar son los procesamientos abiertos (sección 2).
+- ~~**Salientes a personas que no están en la base de datos**~~ **✅ (2026-11-17):** fuera del
+  MVP; se descartan con una nota (sección 4.1).
 
 ### Fuera de este documento
 
