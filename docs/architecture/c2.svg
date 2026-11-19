@@ -75,7 +75,7 @@
 
   <!-- Modelo + RAG -->
   <rect class="pip" x="1034" y="657" width="240" height="120" rx="14"/>
-  <text class="t" x="1154" y="707">Modelo</text><text class="sp" x="1154" y="741">SLM o LLM</text>
+  <text class="t" x="1154" y="698">Modelo</text><text class="sp" x="1154" y="730">SLM o LLM</text><text class="sp" x="1154" y="760">Social: sin RAG</text>
   <path class="ln" d="M918 717 H1028" marker-start="url(#a)" marker-end="url(#a)"/>
   <text class="l" x="974" y="664" text-anchor="middle">Si puede</text>
   <text class="l" x="974" y="694" text-anchor="middle">resolver</text>
@@ -83,7 +83,7 @@
   <text class="l" x="1004" y="618" text-anchor="middle">Gateway de salida</text>
 
   <path class="ln" d="M1154 781 V849" marker-start="url(#a)" marker-end="url(#a)"/>
-  <text class="l" x="1166" y="822">Solo FAQ</text>
+  <text class="l" x="1166" y="822">Si es FAQ</text>
   <rect class="grn" x="1034" y="853" width="240" height="150" rx="14"/>
   <text class="tg" x="1154" y="898">RAG</text>
   <text class="sg" x="1154" y="938">BM25 + embeddings</text>
