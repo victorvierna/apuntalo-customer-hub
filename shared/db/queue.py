@@ -139,3 +139,68 @@ def record_failure(
             conversation_external_id,
         ),
     )
+
+
+def has_synced(conn: sqlite3.Connection, channel_account_id: int) -> bool:
+    """Whether the reader already read this account at least once.
+
+    Also looks at ``conversations``: old ``done`` rows of the queue can be
+    deleted (``database.md``, open decision 13), but stored conversations stay.
+    """
+    row = conn.execute(
+        """
+        SELECT EXISTS (SELECT 1 FROM inbound_queue WHERE channel_account_id = ?)
+            OR EXISTS (SELECT 1 FROM conversations WHERE channel_account_id = ?)
+        """,
+        (channel_account_id, channel_account_id),
+    ).fetchone()
+    return bool(row[0])
+
+
+def is_known_conversation(
+    conn: sqlite3.Connection, channel_account_id: int, conversation_external_id: str
+) -> bool:
+    """Whether a channel conversation was already queued or stored."""
+    row = conn.execute(
+        """
+        SELECT EXISTS (SELECT 1 FROM inbound_queue
+                       WHERE channel_account_id = ? AND conversation_external_id = ?)
+            OR EXISTS (SELECT 1 FROM conversations
+                       WHERE channel_account_id = ? AND external_id = ?)
+        """,
+        (channel_account_id, conversation_external_id, channel_account_id, conversation_external_id),
+    ).fetchone()
+    return bool(row[0])
+
+
+def last_known_message_id(
+    conn: sqlite3.Connection, channel_account_id: int, conversation_external_id: str
+) -> str | None:
+    """Channel id of the newest message we already have for a conversation.
+
+    Looks at the stored messages first and then at the queue, because old
+    ``done`` rows of the queue can be deleted. ``None`` if there are none.
+    """
+    row = conn.execute(
+        """
+        SELECT m.external_id
+        FROM messages m
+        JOIN conversations c ON c.id = m.conversation_id
+        WHERE c.channel_account_id = ? AND c.external_id = ? AND m.external_id IS NOT NULL
+        ORDER BY m.created_at DESC, m.id DESC
+        LIMIT 1
+        """,
+        (channel_account_id, conversation_external_id),
+    ).fetchone()
+    if row is not None:
+        return row[0]
+    row = conn.execute(
+        """
+        SELECT message_external_id FROM inbound_queue
+        WHERE channel_account_id = ? AND conversation_external_id = ?
+        ORDER BY enqueued_at DESC, id DESC
+        LIMIT 1
+        """,
+        (channel_account_id, conversation_external_id),
+    ).fetchone()
+    return row[0] if row is not None else None

@@ -1,6 +1,7 @@
 # Arquitectura del gateway (`modules/gateway/`)
 
-> **Estado:** primera versión implementada en `modules/gateway/` (sin lector ni enrutador).
+> **Estado:** primera versión implementada en `modules/gateway/` con el lector de Instagram
+> (`modules/channels/instagram/poller.py`); falta el enrutador.
 > **Fecha:** 2026-11-16 (actualizado el 2026-11-17 con el código)
 > **Depende de:** esquema v4 de la base de datos (`people`, `contacts`, `blocks`,
 > `inbound_queue`, `run_messages`, `routing_decisions`), ver `docs/architecture/database.md`.
@@ -434,11 +435,14 @@ Todo con la librería estándar (`docs/decisions/0001-python.md`).
 
 Ningún archivo del gateway importa nada de `modules/channels/`.
 
+El lector que encola es `modules/channels/instagram/poller.py` (`poll_once()`), documentado
+en `docs/modules/instagram.md`.
+
 **Pendiente, en otras PR:**
-- `modules/channels/instagram/poller.py`, el lector que encola (sección 2).
 - `shared/types/routing.py` con `RouteRequest` y `RouteDecision` (sección 7), junto con el
   enrutador. Mientras no exista, las ráfagas aceptadas quedan como procesamientos abiertos.
-- Cómo se arranca el gateway (decisión abierta 1). Hoy solo existe `run_once()`.
+- Cómo se arrancan el lector y el gateway (decisión abierta 1). Hoy solo existen
+  `poll_once()` y `run_once()`.
 
 ## 9. Decisiones abiertas
 
@@ -476,7 +480,7 @@ Ningún archivo del gateway importa nada de `modules/channels/`.
   'human_owned'`, añadido en el esquema v3 (sección 4.6).
 - ~~**Mensajes repetidos en la cola, ráfagas e historial**~~ **✅ (2026-11-16):** `UNIQUE` por
   mensaje, agrupación por conversación e `is_backfill` (sección 2). Cómo detecta el lector el
-  historial: `database.md`, decisión abierta 14.
+  historial: `database.md`, decisión 14.
 - ~~**Conversaciones de grupo**~~ **✅ (2026-11-16):** fuera del MVP. El lector no encola
   conversaciones con más de un participante, así que nunca llegan al gateway.
 - ~~**Caída a mitad de una ráfaga**~~ **✅ (2026-11-17):** cada ráfaga va en una sola
