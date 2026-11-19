@@ -162,6 +162,26 @@ Cómo leerlo:
 - `Hit.score` pasa a tener dos valores útiles: la posición RRF (para ordenar) y el coseno (para el
   umbral). Hay que reflejarlo en `shared/types/rag.py` y en `faq_retrievals` al implementarlo.
 
+## Encaje con el estudio de observabilidad (PR #17)
+
+El estudio de Fernando (`docs/architecture/observabilidad-alternativas.md`) y esta decisión se
+tocan en cuatro puntos:
+
+- **Invariante "nunca inventa" (S9).** S9 cuenta las respuestas `replied` + `answer` sin filas en
+  `faq_retrievals`, y debe dar siempre 0. Las respuestas `social` no tienen FAQ a propósito, así que
+  harían saltar la alerta si se registran como un `answer` más. Por eso `social` tiene que poder
+  distinguirse en `processing_runs` (con su `intent` o con una acción propia) y S9 excluirlo.
+- **Sellado de versiones (P1).** `faq_version` no basta para explicar una búsqueda híbrida: el
+  resultado depende también del modelo de embeddings. Hay que sellar también el modelo (por
+  ejemplo, `multilingual-e5-small` y su revisión) y el umbral de abstención (que entraría en
+  `config_hash`).
+- **Degradación segura (5.2).** Si el modelo de embeddings no carga o falla, no hay coseno y el RAG
+  no puede decidir si abstenerse. En ese caso **no** se responde solo con BM25: se deriva a Bárbara,
+  que es el escalón seguro de su escalera de fallos. Es un fallo más para su catálogo (5.1).
+- **Dependencias.** Esta decisión trae la primera dependencia de Python (PyTorch); su decisión
+  abierta 1 pregunta si se aceptan dependencias y contenedores para la observabilidad. Conviene
+  elegir el gestor de dependencias (pendiente en la 0001) una sola vez para las dos.
+
 ## Pendiente
 
 - **Implementar** la búsqueda híbrida en `modules/rag/` (otra PR, con sus tests y la evaluación).
