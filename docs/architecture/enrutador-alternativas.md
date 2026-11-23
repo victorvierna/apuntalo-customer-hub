@@ -43,23 +43,26 @@ devuelve un `RouteDecision`:
 
 ```mermaid
 flowchart TD
-    M[Ráfaga aceptada por el gateway] --> R{1. Reglas}
+    M[Ráfaga aceptada por el gateway] --> R{Paso 1: Reglas}
     R -->|caso evidente| T[Plantilla o sin respuesta]
-    R -->|no aplica| E[2. e5-small: vector del mensaje<br/>una vez, lo reutiliza el RAG]
-    E --> C{3. Clasificador de intención}
+    R -->|no aplica| E[Paso 2: e5-small: vector del mensaje<br/>una vez, lo reutiliza el RAG]
+    E --> C{Paso 3: Clasificador de intención}
     C -->|confianza ≥ umbral| I[Intención]
-    C -->|confianza < umbral| X{4. Caso dudoso<br/>F1 / F1' / F2, se medirá}
+    C -->|confianza < umbral| X{Paso 4: Caso dudoso<br/>F1 / F1' / F2, se medirá}
     X -->|F1 / F1': árbitro etiqueta| I
     X -->|F2: escalado directo| RAG2[RAG]
     RAG2 -->|vacío| H
     RAG2 -->|fragmentos| L2[LLM responde<br/>o devuelve handoff]
-    I -->|faq| N{5. ¿Basta el SLM?}
+    I -->|faq| N{Paso 5: ¿Basta el SLM?}
     N -->|P ≥ umbral| S[SLM + RAG]
     N -->|P < umbral| L[LLM + RAG]
     I -->|social| SP[SLM con prompt social<br/>sin RAG ni datos]
     I -->|request / out_of_faq| H[Handoff a Bárbara<br/>plantilla]
     S -->|rechazada por el gateway de salida| L
 ```
+
+El mismo diagrama en imagen: `enrutador-flujo.png`, capturado del bloque anterior renderizado con Mermaid 11.4.1.
+Si se cambia el bloque, hay que regenerar la imagen.
 
 Dos decisiones separadas, cada una con su confianza:
 
