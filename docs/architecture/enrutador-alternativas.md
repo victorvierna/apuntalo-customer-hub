@@ -64,10 +64,22 @@ flowchart TD
 El mismo diagrama en imagen: `enrutador-flujo.png`, capturado del bloque anterior renderizado con Mermaid 11.4.1.
 Si se cambia el bloque, hay que regenerar la imagen.
 
-Dos decisiones separadas, cada una con su confianza:
+**Un modelo con tres salidas.** El mensaje pasa una sola vez por e5-small y, sobre ese vector,
+el clasificador da tres salidas:
 
-1. **¿Qué intención tiene?** La toma el clasificador; solo si duda, se escala.
-2. **Solo si es `faq`: ¿basta el SLM para responder?** La toma un segundo clasificador.
+```
+mensaje → e5-small (un vector) → ┬─ intención:  faq 0,94 · request 0,03 · …
+                                 ├─ dificultad: P(el SLM basta) = 0,85
+                                 └─ tema:       "bonos y precios"
+```
+
+| Salida | Qué decide |
+|---|---|
+| **Intención** | La acción (`faq` → responder; `request` / `out_of_faq` → handoff; `social` → prompt social). Si su confianza es baja, el mensaje va al caso dudoso |
+| **Dificultad** | Solo en `faq`: SLM o LLM, según el umbral |
+| **Tema** | Por ahora nada: se registra para las métricas (la temática aprobada del TFG pide analizarlo) |
+
+El coste y la latencia no son salidas del modelo: se controlan con el umbral de dificultad.
 
 Dos ejemplos:
 
@@ -104,10 +116,12 @@ El texto se convierte en vector **una sola vez** y lo usan el enrutador y el RAG
 | `paraphrase-multilingual-MiniLM-L12-v2` | ❌ | Por debajo de BM25 en la prueba del RAG |
 | *Embeddings* por API | ❌ | Saca los mensajes a un tercero (RGPD) y añade latencia de red |
 
-### 3.3 Clasificador de intención 🧪
+### 3.3 Tipo de clasificador 🧪
 
-Las cuatro candidatas parten de e5-small. **No son cuatro pasos**: son cuatro formas de construir
-la misma pieza. Se construyen todas, se comparan con los mismos datos y en producción va la que gane.
+Las cuatro candidatas parten de e5-small y dan las mismas salidas (intención y dificultad; el tema
+se saca aparte, sin entrenar). **No son cuatro pasos**: son cuatro formas de construir la misma
+pieza. Se construyen todas, se comparan con los mismos datos y en producción va la que elija la
+regla de la sección 5.1.
 
 | | Cómo funciona | Qué aporta | Coste |
 |---|---|---|---|
@@ -234,17 +248,34 @@ y cascada.
 
 | Pregunta | Comparación | Métricas |
 |---|---|---|
-| ¿Qué clasificador de intención? | A, B, C, D | F1 macro, calibración (ECE), % escalado, p95 de latencia |
+| ¿Qué tipo de clasificador? | A, B, C, D | F1 macro, calibración (ECE), % escalado, p95 de latencia |
 | ¿Qué hacer con los dudosos? | F1, F1', F2 | Acierto en dudosos, coste y latencia por dudoso, % de `request` colados |
 | ¿Cuánto se ahorra? (H1, H2) | Enrutador frente a las líneas base | % de llamadas al LLM, coste por mensaje, calidad según el juez |
 | ¿Es despreciable la decisión? (H3) | Fase de clasificador | p95 de `routing_decisions.latency_ms` con `phase = classifier` |
 
 Todo sale de `routing_decisions`, `processing_runs` y `model_calls`, sin tablas nuevas.
 
+### 5.1 Cómo se elige la opción final
+
+Las reglas se fijan **antes** de medir, para que la elección no dependa de cómo salgan los números.
+Los valores marcados como propuesta (2 %, 5 puntos, 20 %…) se acuerdan con el equipo en esta PR.
+
+| Decisión | Regla | Apuesta previa |
+|---|---|---|
+| **Tipo de clasificador** (A, B, C, D) | Se elige **el más simple** que cumpla las dos condiciones: (1) su F1 macro de intención **no es significativamente peor** que el del mejor (*bootstrap* pregunta a pregunta, IC 95 %, como en el ADR 0002) y (2) **p95 de la fase de clasificador < 20 ms** (H3). Orden de simplicidad: A < B < C < D | **B**: comparte el vector con el RAG, no hay modelo propio que mantener y con ~500 ejemplos suele bastar |
+| **Umbral de intención** | El que deja el **error entre los no escalados ≤ 5 %** (propuesta) con el menor % escalado. Si para eso hay que escalar más del 20 %, se revisan los datos o el clasificador antes de aceptarlo | 10–20 % escalado |
+| **Caso dudoso** (F1, F1', F2) | **F2** si el % de `request` que se cuelan como respuesta es **≤ 2 %** (propuesta) **y** su coste por mensaje dudoso es menor que el de F1. Si no, **F1**. **F1'** sustituye a F1 si su acierto en los dudosos está a **≤ 5 puntos** del de F1 (propuesta) y su p95 es aceptable | **F1** |
+| **Umbral de dificultad** (SLM o LLM) | El que **minimiza el coste** con una **pérdida de calidad < 10 %** frente a "siempre LLM", medida con el juez. Es la condición de H2 | Por medir |
+| **SLM** | El de mejor calidad en español según el juez, entre los que tengan licencia permisiva y una latencia de generación aceptable en CPU (tope a fijar con el equipo) | Por medir |
+| **LLM** | Lo decide el equipo (proveedor), con la misma evaluación | — |
+
+Si ninguna opción de una fila cumple su regla, la decisión vuelve al equipo con los datos; no se
+relaja la regla a posteriori sin dejarlo escrito.
+
 ## 6. Consecuencias en el esquema
 
 - **`social`** no está en los `CHECK` de `intent` (pendiente del ADR 0002).
-- **Dos clasificadores en una fase:** `routing_decisions` tiene una fila por fase y un único `scores`.
+- **Dos salidas en una fase:** `routing_decisions` tiene una fila por fase y un único `scores`.
   Propuesta: guardar los dos en el mismo JSON, p. ej.
   `{"intent": {"faq": 0.94, "request": 0.03, …}, "slm_ok": 0.85}`. El campo `confidence` y el `threshold` se
   refieren a la intención; el umbral del nivel iría en `config_hash` o en el propio JSON. A decidir.
@@ -261,6 +292,7 @@ Todo sale de `routing_decisions`, `processing_runs` y `model_calls`, sin tablas 
    Hoy el nombre se usa para las dos cosas.
 5. **Proveedor del LLM**, que fija también el árbitro.
 6. **Export de conversaciones de Bárbara**, del que dependen el entrenamiento y el test.
+7. **Valores de las reglas de elección** (sección 5.1): 2 %, 5 puntos, 5 % de error y el tope de latencia del SLM.
 
 ## Referencias
 
