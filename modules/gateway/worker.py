@@ -6,7 +6,7 @@ open (``gateway.md``, open decision 1).
 
 import logging
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from shared.db.connection import to_db_time, transaction
 from shared.db.queue import pending_burst, ready_conversations, record_failure
@@ -16,9 +16,8 @@ from .pipeline import process_burst
 
 logger = logging.getLogger(__name__)
 
-# Proposals in database.md, open decision 12.
-BURST_WINDOW = timedelta(seconds=8)
-"""A conversation is processed once it has had no new queued message for this long."""
+# When a burst is over (QUIET_PERIOD, MAX_WAIT) is decided in shared/db/queue.py,
+# because the channel readers use the same values.
 
 MAX_ATTEMPTS = 3
 """Failed attempts before a burst is marked ``failed``."""
@@ -34,9 +33,7 @@ def run_once(conn: sqlite3.Connection, now: datetime | None = None) -> list[Gate
     now = now or datetime.now(UTC)
     now_text = to_db_time(now)
     decisions = []
-    for account_id, conversation_external_id in ready_conversations(
-        conn, to_db_time(now - BURST_WINDOW)
-    ):
+    for account_id, conversation_external_id in ready_conversations(conn, now):
         try:
             with transaction(conn):
                 # Read again under the write lock: another process may have

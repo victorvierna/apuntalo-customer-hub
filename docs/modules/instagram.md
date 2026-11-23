@@ -222,16 +222,18 @@ Solo lee y encola: no toca `contacts`, `conversations` ni `messages`.
 
 ```python
 from modules.channels.instagram import InstagramAdapter, InstagramCli
-from modules.channels.instagram.poller import poll_once
+from modules.channels.instagram.poller import poll_once, run_due_rechecks
 from shared.db.connection import connect
 
 conn = connect()
 adapter = InstagramAdapter(InstagramCli(account="nombre_de_usuario"))
 result = poll_once(conn, adapter, channel_account_id=1)  # la fila de esa cuenta
+run_due_rechecks(conn, adapter, channel_account_id=1)    # entre pasadas, a menudo
 ```
 
 En cada pasada lee las conversaciones recientes (`inbox`, 10 como mucho) y los últimos 20
-mensajes de cada una, y los encola. Cada conversación va en su propia transacción.
+mensajes de cada una, y los encola. Cada conversación va en su propia transacción, junto con
+la hora de la lectura (`conversation_checks`).
 
 - **Sin límite fijo de mensajes:** si una conversación ya la conocíamos, el lector pide páginas
   anteriores (`read --cursor`) hasta encontrar el último mensaje que ya tiene (el ancla), con
@@ -244,8 +246,14 @@ mensajes de cada una, y los encola. Cada conversación va en su propia transacci
   `result.inbox_full` es `True` y se avisa en el log: las conversaciones más antiguas pueden no
   aparecer en esa pasada. Esto **no** está resuelto: instagram-cli no ofrece paginar `inbox`.
 
-- **Relecturas:** un mensaje que ya está en la cola no se vuelve a encolar (`UNIQUE`), así que
-  el lector no necesita recordar dónde se quedó.
+- **Mensajes repetidos:** un mensaje que ya está en la cola no se vuelve a encolar (`UNIQUE`),
+  así que el lector no necesita recordar dónde se quedó.
+- **Ráfagas (relecturas):** cuando encuentra mensajes nuevos de un cliente, vuelve a leer esa
+  conversación 20 s después, y otra vez mientras siga encontrando mensajes. Las relecturas que
+  tocan van antes de la siguiente conversación de la pasada, y entre pasadas hay que llamar a
+  `run_due_rechecks()`. El gateway espera a una relectura sin novedades para contestar toda la
+  ráfaga de una vez (`docs/architecture/gateway.md`, sección 2). Una relectura que falla se
+  aplaza otros 20 s.
 - **Grupos:** no se encolan (fuera del MVP).
 - **Errores:** si falla una conversación, se anota en `failed_conversations` y se sigue con
   las demás; la siguiente pasada la reintenta. Si la sesión ha caducado
