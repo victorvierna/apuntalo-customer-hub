@@ -25,8 +25,11 @@ necesite intervención humana se deriva a Bárbara (equipo de Apúntalo).
     `docs/modules/instagram.md`). Cada canal traduce sus datos a los tipos de `shared/types/`.
   - `gateway/` — entrada única al núcleo; decide si el asistente puede contestar o no.
   - `handoff/` — si el asistente no puede contestar, deriva la conversación a una persona.
-  - `logging/` — registra cada mensaje, respuesta, modelo, coste y derivación para depurar y medir el MVP.
   - `models/` — clientes de los modelos de IA; el router decide cuál usar.
+  - `observability/` — registra cada mensaje, respuesta, modelo, coste y derivación para depurar
+    y medir el MVP (logs técnicos, métricas de salud, reproducibilidad). No se llama `logging/`
+    para no tapar el `logging` de la librería estándar. Diseño en
+    `docs/architecture/observabilidad-alternativas.md`.
   - `platform/` — dashboard interno: bandeja de conversaciones y gestión de la derivación.
   - `rag/` — busca en `data/faqs/` la información para responder; si no la encuentra, devuelve vacío.
   - `router/` — escoge el mejor modelo para contestar según la entrada.

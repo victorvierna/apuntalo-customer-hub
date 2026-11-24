@@ -23,7 +23,7 @@ Instagram → Gateway (filtra) → Enrutador (decide) → Modelo + RAG (responde
 La base de datos tiene que dar soporte a tres necesidades:
 
 1. **El dashboard** (`modules/platform/`): bandeja de conversaciones y gestión de derivaciones.
-2. **El logging** (`modules/logging/`): registrar cada mensaje, respuesta, modelo, coste y
+2. **El logging** (`modules/observability/`): registrar cada mensaje, respuesta, modelo, coste y
    derivación para depurar y medir el MVP.
 3. **La derivación** (`modules/handoff/`): saber qué conversaciones esperan a una persona,
    quién las atiende y qué se decide con el conocimiento nuevo.
@@ -831,7 +831,7 @@ se basa en una FAQ.
   - La ruta se puede cambiar con la variable de entorno `DATABASE_PATH` (por ejemplo, en
     `env/`). Las rutas relativas se resuelven desde la raíz del repositorio.
   - El script que crea el esquema es `shared/db/init_db.py`. Va en `shared/` porque la base
-    de datos la usan varios módulos (`logging`, `handoff`, `platform`…). Se ejecuta con
+    de datos la usan varios módulos (`observability`, `handoff`, `platform`…). Se ejecuta con
     `python shared/db/init_db.py`, solo usa la librería estándar de Python y se puede
     ejecutar varias veces sin problema: guarda la versión del esquema en
     `PRAGMA user_version` y solo lo aplica una vez.
