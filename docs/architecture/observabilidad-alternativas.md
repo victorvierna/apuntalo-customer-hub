@@ -1,9 +1,10 @@
 # Alternativas de diseño para logs, métricas de salud, reproducibilidad y resiliencia
 
-> **Estado:** estudio para revisión (borrador). No es una decisión: lo que se elija irá a
-> `docs/decisions/` cuando se haya discutido.
-> **Fecha:** 2026-11-19
-> **Alcance:** cómo registra el sistema lo que hace (`modules/logging/`), cómo sabemos si está
+> **Estado:** estudio para revisión (borrador). El **pilar 1 (logs técnicos) está decidido**:
+> ver 2.8. El resto no es una decisión: lo que se elija irá a `docs/decisions/` cuando se haya
+> discutido.
+> **Fecha:** 2026-11-19 (actualizado el 2026-11-24 con las decisiones del logger)
+> **Alcance:** cómo registra el sistema lo que hace (`modules/observability/`), cómo sabemos si está
 > sano, cómo se reproduce una decisión pasada y cómo aguanta los fallos. Cubre todos los
 > módulos del núcleo y el adaptador de Instagram. Quedan fuera el diseño del dashboard y la
 > retención de datos (RGPD, `database.md` decisión abierta 2), aunque se señala dónde les afecta.
@@ -92,12 +93,14 @@ para cada una y cómo encajan.
 - Contexto con `contextvars`: un gestor `with log_context(run_id=42, conversation_id=7):`
   y un `Filter` que añade esos campos a cada registro. Funciona igual con hilos y con
   `asyncio` si algún día se usa.
-- Destino: **salida estándar** (en Docker la recoge `docker logs` y cualquier herramienta
-  posterior) y, opcionalmente, archivo con `RotatingFileHandler` en `storage/logs/`
-  (que git ya ignora).
-- `QueueHandler` + `QueueListener` (también estándar) para que escribir el log no bloquee
-  el pipeline aunque el disco vaya lento.
-- Un filtro de redacción que elimina claves sensibles (`text`, `username`, `token`…).
+- Destino: **salida de errores (stderr)** (en Docker la recoge `docker logs` y cualquier
+  herramienta posterior) y, opcionalmente, un archivo por proceso con
+  `TimedRotatingFileHandler` en `storage/logs/` (que git ya ignora).
+- Escritura síncrona; `QueueHandler` + `QueueListener` (también estándar) queda como opción
+  si algún día escribir fuera lento.
+- Un filtro de redacción con lista blanca: solo salen con su valor los campos aprobados.
+
+El detalle de cada una de estas piezas, y lo que se descartó, está en **2.8**.
 
 ```json
 {"ts":"2026-11-19T10:02:11.402Z","level":"ERROR","logger":"modules.gateway.worker",
@@ -109,7 +112,7 @@ para cada una y cómo encajan.
 |---|---|
 | Cero dependencias; ya se usa. | Hay que escribir y testear el formateador y el contexto (poco código). |
 | Todas las librerías de terceros ya escriben en `logging`: sus logs salen en el mismo formato. | La API (`logger.info("...", extra={...})`) es algo verbosa. |
-| JSON por salida estándar es lo que entienden Loki, Elastic, CloudWatch… si se crece. | Buscar en los archivos es con `grep`/`jq` hasta que haya otra herramienta. |
+| JSON por stderr es lo que entienden Loki, Elastic, CloudWatch… si se crece. | Buscar en los archivos es con `grep`/`jq` hasta que haya otra herramienta. |
 
 ### 2.3 Alternativa L2 — `structlog`
 
@@ -134,7 +137,7 @@ Guardar también los logs técnicos en la base de datos, junto al registro de do
 
 **Variante razonable:** solo los eventos importantes y poco frecuentes (arranques, sesión de
 Instagram caducada, cambios de estado del *circuit breaker*, alertas) van a una tabla, y el
-resto a salida estándar. Esa tabla es en realidad parte de las métricas de salud (sección 3).
+resto a stderr. Esa tabla es en realidad parte de las métricas de salud (sección 3).
 
 ### 2.5 Alternativa L4 — OpenTelemetry (logs + trazas + métricas)
 
@@ -174,6 +177,227 @@ esquema: `processing_runs.started_at/finished_at`, `routing_decisions.latency_ms
 | Sirve si cae la BD | Sí | Sí | **No** | Sí |
 | Valor para el TFG | Medio | Medio | Bajo | Alto |
 | Camino de crecimiento | A L4 sin cambiar llamadas si hay fachada propia | A L4 | Difícil | — |
+| **Decisión** | **Elegida (2.8)** | Descartada | Solo eventos raros, como parte de la sección 3 | Fase 5 (opcional) |
+
+### 2.8 Decisión: diseño del logger (cerrado el 2026-11-24)
+
+> **Estado:** decidido. Se elige **L1** (`logging` de la librería estándar con JSON propio),
+> sin dependencias. Esta sección recoge cada decisión de detalle y las alternativas que se
+> descartaron, para poder justificarlas en el TFG.
+
+| # | Decisión | Elegido | Descartado |
+|---|---|---|---|
+| 1 | Formato de línea | JSON, una línea por evento | Texto plano, logfmt |
+| 2 | Cómo entra el contexto | `contextvars` + `Filter`, y fachada con argumentos con nombre | `extra={}` a mano, `LoggerAdapter` |
+| 3 | Configuración | `dictConfig` en `setup_logging()`, llamada solo desde los puntos de entrada | `basicConfig`, `fileConfig` |
+| 4 | Destino | stderr siempre; además, un archivo por proceso si se define `LOG_DIR` | Archivo compartido, `logrotate`, syslog, SQLite |
+| 5 | Escritura | Síncrona | `QueueHandler` + `QueueListener` |
+| 6 | Redacción | Lista blanca de campos + convención de mensajes fijos; las excepciones se registran completas | Lista negra |
+| 7 | Versión y errores | Versión en cada línea; error en campos separados; traza solo en errores inesperados | Versión solo al arrancar; traza en un único campo |
+
+#### 2.8.1 Formato: JSON
+
+Cada evento es un objeto JSON en una sola línea. Se puede filtrar por campo con `jq` y lo
+entienden Loki, Elastic y CloudWatch sin configuración extra.
+
+- **Texto plano** (`ERROR gateway failed run=42`): fácil de leer, pero no se puede filtrar
+  por campo de forma fiable.
+- **logfmt** (`level=error msg="gateway failed" run_id=42`): legible y filtrable, pero menos
+  extendido que JSON y sin tipos (todo es texto).
+
+#### 2.8.2 Contexto: `contextvars` + fachada
+
+El problema: el `run_id` lo conoce el gateway, pero los logs se escriben también en módulos
+más profundos (enrutador, cliente del modelo) que no lo reciben.
+
+| Opción | Cómo llega el `run_id` al log | Inconveniente |
+|---|---|---|
+| `extra={}` | Se pasa como parámetro a cada función y se pone en cada llamada | Parámetros que solo sirven para el log; fácil de olvidar |
+| `LoggerAdapter` | Se crea un logger con el `run_id` y se pasa de función en función | Sigue habiendo que pasar algo |
+| **`contextvars` + `Filter`** | El gateway abre `with log_context(run_id=42):` y todo lo que se registra dentro lo lleva | — |
+| **Fachada con argumentos con nombre** | `log.info("burst accepted", messages=3)` | No es contexto: es para los datos propios de cada evento |
+
+Se usan **las dos últimas a la vez**:
+
+```python
+def process_burst(conn, burst):
+    run_id = start_run(conn, burst)
+    with log_context(run_id=run_id):       # contexto de toda la ejecución
+        model = choose_model(burst)        # no se pasa nada
+
+def choose_model(burst):
+    log.warning("score below threshold", score=0.41)   # sale con run_id y score
+```
+
+Una `ContextVar` es una variable "global" que pertenece a la ejecución actual: cada hilo o
+tarea de `asyncio` ve su propio valor, así que dos ráfagas procesadas a la vez no se mezclan.
+Los contextos se anidan (el lector pone `account_id`; el gateway añade `run_id`) y al salir
+del `with` se restauran. Un `ContextFilter` en el handler copia esos campos en cada registro.
+Son unas 40 líneas de código propio.
+
+#### 2.8.3 Configuración: `dictConfig`
+
+Una función `setup_logging(component)` en `modules/observability/` construye un diccionario y
+llama a `logging.config.dictConfig`. Solo la llaman los puntos de entrada (los scripts que
+arrancan el lector, el gateway y el dashboard); los módulos solo hacen
+`logging.getLogger(__name__)` y nunca configuran nada.
+
+- El nivel se elige con la variable de entorno `LOG_LEVEL` (por defecto `INFO`), igual que
+  `DATABASE_PATH`.
+- `basicConfig` sigue existiendo, pero se queda corto para un formateador JSON con filtros.
+- `fileConfig` (archivo `.ini`) es el sistema antiguo; la documentación de Python recomienda
+  `dictConfig`, que hace lo mismo y más.
+
+#### 2.8.4 Destino: stderr + archivo opcional por proceso
+
+El lector y el gateway son **procesos separados** que se comunican por la cola
+(`gateway.md`, sección 2), y el dashboard será otro. Cómo se arrancan sigue abierto
+(`gateway.md`, decisión abierta 1). El destino se elige para que esa decisión no bloquee el
+logger:
+
+- **Siempre, stderr** (`StreamHandler`). El proceso escribe y se olvida; quien lo arranca
+  decide qué hacer con la salida:
+
+  | Si se arranca con… | Los logs acaban en… |
+  |---|---|
+  | Docker | `docker logs`, y de ahí Alloy → Loki (sección 8) |
+  | systemd | journald (`journalctl -u …`) |
+  | cron | Donde lo redirija la línea del cron |
+
+  Se usa stderr y no stdout porque es el valor por defecto de `StreamHandler` y deja stdout
+  libre para lo que un script quiera imprimir como resultado. Docker recoge las dos.
+- **Opcional, un archivo por proceso** (`TimedRotatingFileHandler`): si se define la variable
+  `LOG_DIR` (p. ej. `storage/logs`, que git ya ignora), cada proceso escribe además en su
+  propio archivo (`gateway.log`, `poller.log`…), que rota a medianoche y guarda 14 copias
+  (`when="midnight"`, `backupCount=14`), en línea con la retención de 6.2. Se rota por días y
+  no por tamaño (`RotatingFileHandler`) para poder expresar la retención en días.
+
+Descartados:
+
+- **Un archivo compartido por varios procesos:** cada proceso rota por su cuenta y, al
+  rotar, uno renombra el archivo mientras otro sigue escribiendo en el viejo: se pierden o
+  mezclan líneas. La documentación de Python avisa de que no es seguro. Por eso el archivo
+  es **por proceso**; si algún día corren dos gateways a la vez, se usa solo stderr o se
+  añade el PID al nombre.
+- **`WatchedFileHandler` + `logrotate`:** resuelve lo anterior, pero exige configurar el
+  sistema fuera del repo.
+- **Syslog / journald directo:** con systemd, stderr ya acaba en journald sin hacer nada.
+- **SQLite:** ver L3 (2.4). Solo los eventos raros e importantes irán a una tabla, y eso es
+  parte de las métricas de salud (sección 3).
+
+#### 2.8.5 Escritura síncrona
+
+Cada `log.info(...)` escribe en el momento. Con este volumen y destinos locales (stderr o un
+archivo), escribir tarda microsegundos.
+
+Se descarta por ahora **`QueueHandler` + `QueueListener`** (escritura en otro hilo) porque:
+
+- Solo compensa si escribir es lento (disco de red, envío por HTTP); con Alloy leyendo
+  stderr no hace falta.
+- En Python 3.11 hay que montarlo a mano: `dictConfig` no lo configura hasta 3.12.
+- Si el proceso muere de golpe, se pierden las líneas que quedaban en la cola, que suelen ser
+  las que explican la caída.
+- Las `contextvars` son del hilo que las crea: el `ContextFilter` tendría que ir en el
+  `QueueHandler` y no en el handler final, o el `run_id` se pierde.
+
+Como todo está en `setup_logging()`, cambiarlo más adelante solo toca esa función.
+
+#### 2.8.6 Redacción de datos personales
+
+Un dato personal puede entrar en un log por tres vías; cada una se trata de forma distinta.
+
+**a) Por los campos: lista blanca.** Solo salen con su valor los campos de una lista
+aprobada:
+
+```python
+ALLOWED_FIELDS = {"run_id", "conversation_id", "account_id", "component", "attempt",
+                  "error_type", "messages", "latency_ms", ...}
+```
+
+Un campo que no está en la lista sale con la clave y el valor tapado:
+
+```json
+{"msg": "burst accepted", "username": "[REDACTED]"}
+```
+
+Así el dato nunca sale, pero se ve que alguien intentó registrarlo. Si el campo es seguro
+(p. ej. `tokens`), se añade a la lista; si no (p. ej. `username`), se quita de la llamada. Un
+test ejecuta el pipeline con datos falsos y **falla si aparece algún `[REDACTED]`**, para que
+la decisión se tome en la PR que añade el campo. El filtro va en el handler, así que también
+cubre los logs de librerías de terceros, que no usan la fachada.
+
+Se descarta la **lista negra** (borrar `text`, `username`, `token`…) porque un campo nuevo
+con otro nombre (`body`, `msg_text`) se colaría sin que nadie se entere.
+
+**b) Por el mensaje: convención.** El mensaje es siempre una frase fija y los datos van en
+campos. Se vigila en la revisión de las PR:
+
+```python
+log.info(f"burst from {username}")        # ❌
+log.info("burst accepted", messages=3)    # ✅
+```
+
+Además, así se puede filtrar en Loki por `msg = "burst accepted"`.
+
+**c) Por las excepciones: se registran completas (riesgo aceptado).** El mensaje y la traza
+de una excepción pueden contener datos de clientes. Se registran igualmente, porque ayudan a
+depurar y mejorar el sistema y los datos los maneja una sola persona en la empresa con acceso
+pleno a ellos. Es el mismo criterio que con Grafana leyendo SQLite (8.2, paso 4).
+Consecuencias:
+
+- Los logs técnicos, y Loki cuando exista, pueden contener datos personales de forma
+  ocasional. La retención corta (14 días) limita la exposición.
+- **Hay que revisarlo si cambia quién accede a los logs** (más personas, acceso externo),
+  junto con la decisión de RGPD (`database.md`, decisión abierta 2).
+
+#### 2.8.7 Versión del código y formato de los errores
+
+**Versión en cada línea.** Se calcula una vez en `setup_logging()` y el mismo
+`ContextFilter` la añade a cada registro como contexto base del proceso, junto con el
+componente (`"component": "gateway"`). Cuesta unos 20 bytes por línea y cualquier línea se
+explica sola, sin buscar el último arranque. La versión sale en cascada:
+
+1. Variable de entorno `APP_VERSION` (en Docker se fija al construir la imagen, donde no hay
+   carpeta `.git`).
+2. Si no existe, `git rev-parse --short HEAD`, con el sufijo `-dirty` si hay cambios sin
+   commitear (avisa de que el código no coincide con ningún commit; ver P1 en 4.3).
+3. Si eso falla, `"unknown"`.
+
+**Errores en campos separados**, no en un único campo `exc`:
+
+```json
+{"level": "ERROR", "msg": "gateway failed on burst", "run_id": 42,
+ "error_type": "OperationalError", "error_message": "database is locked",
+ "traceback": "Traceback (most recent call last):\n  File ...", "version": "bfa2c21"}
+```
+
+Así se puede contar y filtrar por `error_type` sin buscar dentro del texto. Los saltos de
+línea de la traza se escapan en el JSON, de modo que el evento sigue ocupando una línea; las
+excepciones encadenadas (`raise X from Y`) salen completas.
+
+**Cuándo va la traza completa:**
+
+| Situación | Nivel | Traza | Ejemplo |
+|---|---|---|---|
+| Error **esperado** y ya gestionado | `WARNING` | No: solo `error_type` y `error_message` | instagram-cli tarda demasiado y se reintenta |
+| Error **inesperado** | `ERROR` con `log.exception(...)` | Sí, completa | Un `KeyError` en el gateway |
+
+Así el log no se llena de trazas iguales cada vez que Instagram tarda, y una traza completa
+siempre indica algo que hay que mirar.
+
+#### 2.8.8 Ejemplo de uso
+
+```python
+# Punto de entrada del gateway
+from modules.observability import setup_logging, log_context, log
+
+setup_logging("gateway")                 # dictConfig: JSON → stderr (+ LOG_DIR opcional)
+
+with log_context(account_id=1):
+    log.info("worker started")
+    # {"ts": "...", "level": "INFO", "msg": "worker started", "account_id": 1,
+    #  "component": "gateway", "version": "bfa2c21"}
+```
 
 ---
 
@@ -513,30 +737,30 @@ duplicados (deben ser 0) y **sobrecoste** de la instrumentación (latencia y tam
 
 ## 6. Lo que comparten todas las alternativas
 
-### 6.1 Una fachada propia en `modules/logging/`
+### 6.1 Una fachada propia en `modules/observability/`
 
 Igual que el núcleo no habla con Instagram sino con un adaptador, el código no debería
 llamar directamente a `logging`, a `structlog` ni a OpenTelemetry, sino a una interfaz
 mínima propia:
 
 ```python
-from modules.logging import log, span, metric
+from modules.observability import log, span, metric
 
 with span("gateway.process_burst", run_id=run_id):     # contexto + duración
     log.info("burst accepted", messages=len(burst))     # evento estructurado
     metric.increment("gateway_bursts_total", result="accepted")
 ```
 
-La primera implementación escribe JSON por salida estándar (L1) y latidos/muestras en
+La primera implementación escribe JSON por stderr (L1, 2.8) y latidos/muestras en
 SQLite (M2). Si más adelante se adopta OpenTelemetry, se cambia **la implementación de la
 fachada**, no las llamadas repartidas por los módulos. Es el mismo argumento de arquitectura
 que el del canal, y se defiende bien en el TFG.
 
-> **Ojo con el nombre:** un paquete propio llamado `logging` puede tapar el `logging` de la
-> librería estándar si algún script se ejecuta con `modules/` como directorio del script
-> (`sys.path[0]`). Con imports absolutos desde la raíz (`python -m …`) no pasa, pero conviene
-> tenerlo en cuenta o valorar otro nombre (p. ej. `modules/observability/`). Cambiar la
-> estructura de carpetas requiere acordarlo antes (`AGENTS.md`).
+> **Nombre del módulo (decidido el 2026-11-24):** la carpeta se llamaba `modules/logging/`.
+> Un paquete propio con ese nombre puede tapar el `logging` de la librería estándar si algún
+> script se ejecuta con `modules/` como directorio del script (`sys.path[0]`). Para evitarlo,
+> y porque el módulo cubre más que logs (métricas, reproducibilidad), se ha renombrado a
+> **`modules/observability/`**.
 
 ### 6.2 Separar datos personales de datos técnicos
 
@@ -545,7 +769,7 @@ que el del canal, y se defiende bien en el TFG.
 | Tablas de dominio (SQLite) | Sí | Política RGPD (pendiente) |
 | Grafana leyendo SQLite (sección 8) | Sí; aceptado de momento (*backoffice* de una sola persona) | La de las tablas de dominio |
 | Grabaciones de modelos (P2) | Sí | Igual o más corta; candidatas a anonimizar |
-| Logs técnicos (stdout/archivos) | **No** (redacción por defecto) | Corta (p. ej. 14 días, rotación) |
+| Logs técnicos (stderr/archivos) | **No** en los campos (lista blanca); **sí, de forma ocasional**, en los mensajes de excepciones (riesgo aceptado, 2.8.6) | Corta (14 días, rotación) |
 | Métricas y alertas | **No** | Larga (son agregados) |
 
 ### 6.3 Inyección de lo no determinista
@@ -562,7 +786,7 @@ Una propuesta por fases que empieza sin dependencias y deja abierto el camino al
 
 | Fase | Qué | Alternativas | Dependencias |
 |---|---|---|---|
-| **1. Base** | Fachada en `modules/logging/`; logs JSON con contexto y redacción por salida estándar; sellado de versiones; clasificación de errores y espera exponencial en la cola | L1 + P1 + 5.3 | Ninguna |
+| **1. Base** | Fachada en `modules/observability/`; logs JSON con contexto y redacción por stderr (decidido, 2.8); sellado de versiones; clasificación de errores y espera exponencial en la cola | L1 + P1 + 5.3 | Ninguna |
 | **2. Salud** | Latidos, muestras periódicas, vigilante con alertas (correo/Telegram), `/healthz`, semáforo en el dashboard; SLI de 3.2 como vistas SQL | M2 | Ninguna |
 | **3. Resiliencia** | *Circuit breaker* para instagram-cli y modelos; bandeja de salida con reconciliación; supervisión en Docker; copias de la BD; batería de inyección de fallos | 5.4–5.7 | Ninguna |
 | **4. Reproducibilidad** | Grabación de entradas/salidas de modelos con retención; arnés de repetición; casos de regresión desde producción | P2 | Ninguna |
@@ -600,9 +824,9 @@ OpenTelemetry**, para que la migración (fase 5) cambie solo cómo salen las se�
 
 ```
                 ┌────────────── App (Python, solo librería estándar) ──────────────┐
-                │  modules/logging/  (fachada: log, metric, span)                   │
+                │  modules/observability/  (fachada: log, metric, span)             │
                 │     │                     │                                       │
-                │  logs JSON → stdout    GET /metrics (formato texto Prometheus)    │
+                │  logs JSON → stderr    GET /metrics (formato texto Prometheus)    │
                 └─────┼─────────────────────┼───────────────────────────────────────┘
                       │                     │                       storage/*.db
                 Docker (logs)               │                            │
@@ -632,10 +856,10 @@ receptor OTLP en su configuración, sin añadir ni quitar contenedores.
 ### 8.2 Pasos
 
 1. **Instrumentar la app (sin dependencias).**
-   - Fachada `modules/logging/` (6.1): todo el código la usa; nadie llama a una librería
-     directamente.
-   - Logs JSON por salida estándar con `logging` + formateador propio + contexto en
-     `contextvars` (`run_id`, `conversation_id`, `component`). Docker los recoge.
+   - Fachada `modules/observability/` (6.1): todo el código la usa; nadie llama a una
+     librería directamente.
+   - Logs JSON por stderr con `logging` + formateador propio + contexto en `contextvars`
+     (`run_id`, `conversation_id`, `component`), según 2.8. Docker los recoge.
    - `GET /metrics` con `http.server`, con dos tipos de métricas:
      - **En memoria** (contadores e histogramas): ráfagas por resultado, latencia de cada
        llamada a un modelo, fallos de instagram-cli.
@@ -698,7 +922,7 @@ receptor OTLP en su configuración, sin añadir ni quitar contenedores.
 
 | Decisión de ahora | Por qué ayuda luego |
 |---|---|
-| Fachada propia en `modules/logging/` | Se cambia su implementación, no las llamadas de los módulos. |
+| Fachada propia en `modules/observability/` | Se cambia su implementación, no las llamadas de los módulos. |
 | **Nombres de métricas y atributos según las convenciones semánticas de OTel**, incluidas las de GenAI (`gen_ai.client.operation.duration`, `gen_ai.client.token.usage`, `gen_ai.request.model`…) | Los paneles y alertas siguen funcionando tras migrar (OTel traduce `gen_ai.client.token.usage` a `gen_ai_client_token_usage_total` al exportar a Prometheus). |
 | Atributos de recurso: `service.name`, `service.version` (hash de git), `deployment.environment` | Son los que OTel añade a cada señal; hoy van como etiquetas o campos del JSON. |
 | Alloy como colector desde el principio | El receptor OTLP se activa en su configuración. |
@@ -718,12 +942,12 @@ App ──OTLP──> Alloy ──┬──> Prometheus  (receptor OTLP nativo d
 2. Cambiar la implementación de la fachada: `metric` → `Meter`, `span` → `Tracer`, `log`
    sigue en `logging` + `LoggingHandler` de OTel (cada log lleva `trace_id` solo).
 3. Activar `otelcol.receiver.otlp` en Alloy y enviar cada señal a su destino.
-4. **Ejecutar las dos vías en paralelo** (`/metrics` + stdout frente a OTLP), comparar los
+4. **Ejecutar las dos vías en paralelo** (`/metrics` + stderr frente a OTLP), comparar los
    mismos paneles y medir el sobrecoste: es el experimento "a medida frente a estándar" de
    la sección 7.
 5. Aprovechar lo nuevo: correlación automática log ↔ traza y *exemplars* (de un pico de
    latencia a la traza concreta que lo causó).
-6. Retirar `/metrics` y la recogida de stdout cuando esté validado.
+6. Retirar `/metrics` y la recogida de stderr cuando esté validado.
 
 ### 8.5 Consideraciones
 
@@ -739,14 +963,15 @@ App ──OTLP──> Alloy ──┬──> Prometheus  (receptor OTLP nativo d
 
 1. **¿Se permiten dependencias o contenedores extra para la observabilidad?** Condiciona
    L2/L4 y M3/M4 y el plan de la sección 8. Si no, todo se queda en las fases 1–4.
-2. **¿Dónde se despliega?** (un VPS, una máquina de la oficina…). Afecta a si los logs van
-   solo a salida estándar o también a archivos, y a cómo se hacen las copias de la BD.
+2. **¿Dónde se despliega?** (un VPS, una máquina de la oficina…). Afecta a cómo se hacen las
+   copias de la BD. Ya no condiciona el logger: escribe siempre en stderr y, si se define
+   `LOG_DIR`, también en archivos (2.8.4).
 3. **Canal de alertas y destinatario:** correo, Telegram, Slack… ¿A quién avisa: al equipo
    técnico, a Bárbara o a ambos, y para qué alertas?
 4. **Objetivos (SLO) concretos** de la tabla 3.2, en especial la frescura (S1), que depende
    del intervalo del lector (`gateway.md`, decisión abierta 1).
 5. **¿Se graban los prompts y respuestas completos (P2)?** Y con qué retención y
    anonimización. Va ligado a la decisión abierta 2 de `database.md` (RGPD).
-6. **Nombre del módulo:** mantener `modules/logging/` o renombrarlo (ver 6.1).
+6. ~~**Nombre del módulo**~~ **✅ (2026-11-24):** renombrado a `modules/observability/` (ver 6.1).
 7. **Foco del TFG:** si el peso está en salud, en reproducibilidad o en resiliencia, para
    decidir qué fase se evalúa con más profundidad y con qué experimentos.
