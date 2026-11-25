@@ -6,8 +6,9 @@ Usage::
     hits = index.search("¿Cómo creo un bono?")
 
 If nothing matches, ``search`` returns ``[]``: the assistant must not answer
-without guides behind it (``AGENTS.md``). It does not decide whether the best
-score is good enough; that threshold belongs to the router.
+without guides behind it (``AGENTS.md``). It does not yet decide whether the
+best score is good enough: that threshold belongs to the RAG and will use the
+embedding similarity (``docs/decisions/0002-rag-busqueda-hibrida.md``).
 """
 
 import re

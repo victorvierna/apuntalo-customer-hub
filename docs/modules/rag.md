@@ -13,8 +13,9 @@ pregunta ──────────────> search.py ─────�
 ```
 
 Ahora mismo la búsqueda es **por palabras** (BM25 con SQLite FTS5) y solo usa la librería
-estándar. La búsqueda por significado (embeddings) queda como siguiente paso, y solo se hará si la
-evaluación lo justifica (ver "Evaluación").
+estándar. La evaluación ya ha justificado pasar a una búsqueda **híbrida** (BM25 + embeddings con
+`multilingual-e5-small`, fusionadas con RRF): ver `docs/decisions/0002-rag-busqueda-hibrida.md`.
+Está pendiente de implementar.
 
 ## Archivos
 
@@ -76,8 +77,10 @@ lleva `-2`.
 - **`score`**: el `bm25()` de FTS5 es negativo (cuanto más negativo, mejor). Se le cambia el
   signo para que más alto signifique más relevante. **Solo es comparable dentro de la misma
   búsqueda**, no entre preguntas distintas.
-- **No hay umbral de "esto no está en la ayuda".** Decidir si el mejor resultado basta es
-  trabajo del enrutador.
+- **Todavía no hay umbral de "esto no está en la ayuda".** Es trabajo del RAG, no del
+  enrutador, porque el RAG se ejecuta después de que el enrutador decida (decisión 0002). Con BM25
+  no se puede poner, porque su puntuación no es comparable entre preguntas; se pondrá sobre el
+  coseno de los embeddings.
 
 Limitación conocida: solo coinciden palabras exactas. "Creo" no encuentra "crear", y "me han
 cobrado dos veces" no encuentra "cobro duplicado".
@@ -123,7 +126,7 @@ Cómo leerlo:
 
 - Probar mejoras con la evaluación antes de adoptarlas: cortar las palabras a su raíz (que
   "creo" encuentre "crear"), dar más peso al título, devolver la guía entera en vez de la sección.
-- Búsqueda por significado (embeddings) combinada con esta (RRF), si las cifras lo piden. Añade
-  dependencias: hay que decidirlo con el equipo.
+- Implementar la búsqueda híbrida decidida en la 0002 (BM25 + `multilingual-e5-small` con RRF)
+  y el umbral de abstención sobre el coseno.
 - Escribir los resultados en `faq_retrievals` cuando exista el paso que genera la respuesta.
 - Añadir preguntas con el estilo real de los mensajes de Instagram.

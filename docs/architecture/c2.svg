@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1352" height="1558" viewBox="0 0 1352 1558" font-family="Liberation Sans, Arial, Helvetica, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M1 1 L11 6 L1 11" fill="none" stroke="#9a9a96" stroke-width="2"/>
+    </marker>
+    <style>
+      .ext{fill:#4a4a46;stroke:#8a8a85;stroke-width:1.5}
+      .pip{fill:#3d3486;stroke:#7467d8;stroke-width:1.5}
+      .grn{fill:#0b5042;stroke:#2fa07f;stroke-width:1.5}
+      .note{fill:none;stroke:#55554f;stroke-width:1.5;stroke-dasharray:6 6}
+      .t{fill:#e6e6e3;font-size:28px;text-anchor:middle}
+      .se{fill:#bdbdb8;font-size:22px;text-anchor:middle}
+      .sp{fill:#b9adf5;font-size:22px;text-anchor:middle}
+      .sg{fill:#6fd8b0;font-size:22px;text-anchor:middle}
+      .tg{fill:#bdf0dc;font-size:28px;text-anchor:middle}
+      .n{fill:#d6d6d2;font-size:22px}
+      .h{fill:#ececea;font-size:28px}
+      .l{fill:#c9c9c5;font-size:22px}
+      .ln{fill:none;stroke:#9a9a96;stroke-width:2.5}
+      .dl{fill:none;stroke:#66665f;stroke-width:1.5;stroke-dasharray:5 5}
+    </style>
+  </defs>
+  <rect width="1352" height="1558" fill="#161616"/>
+
+  <!-- Externos y canal -->
+  <rect class="ext" x="74" y="33" width="340" height="112" rx="14"/>
+  <text class="t" x="244" y="85">Apúntalo Marketing</text><text class="se" x="244" y="119">Platform</text>
+  <rect class="pip" x="494" y="33" width="380" height="112" rx="14"/>
+  <text class="t" x="684" y="85">Instagram-cli</text><text class="sp" x="684" y="119">Controla varias cuentas</text>
+  <rect class="ext" x="974" y="33" width="300" height="112" rx="14"/>
+  <text class="t" x="1124" y="85">Cliente</text><text class="se" x="1124" y="119">o no cliente, vía MD</text>
+  <path class="ln" d="M418 89 H490" marker-start="url(#a)" marker-end="url(#a)"/>
+  <path class="ln" d="M878 89 H970" marker-start="url(#a)" marker-end="url(#a)"/>
+
+  <!-- Entradas / salidas -->
+  <path class="dl" d="M1124 149 V183"/>
+  <rect class="note" x="724" y="183" width="550" height="216" rx="14"/>
+  <text class="h" x="748" y="230">Entradas</text>
+  <text class="n" x="748" y="273">• FAQ</text>
+  <text class="n" x="748" y="309">• Social (hola, gracias)</text>
+  <text class="n" x="748" y="345">• Petición</text>
+  <text class="n" x="748" y="381">• Fuera de FAQ</text>
+  <text class="h" x="1024" y="230">Salidas</text>
+  <text class="n" x="1024" y="273">• Responder dudas</text>
+  <text class="n" x="1024" y="309">• Charla, sin datos</text>
+  <text class="n" x="1024" y="345">• Petición → Bárbara</text>
+  <text class="n" x="1024" y="381">• Denegar servicio</text>
+
+  <path class="ln" d="M684 151 V427" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text class="l" x="664" y="296" text-anchor="end">Se envía petición y se recibe</text>
+
+  <!-- Gateway -->
+  <rect class="note" x="74" y="417" width="340" height="144" rx="14"/>
+  <text class="l" x="244" y="476" text-anchor="middle">Evita prompt injection</text>
+  <text class="l" x="244" y="520" text-anchor="middle">Timeouts y rate limits</text>
+  <path class="dl" d="M418 489 H470"/>
+  <rect class="pip" x="474" y="433" width="420" height="112" rx="14"/>
+  <text class="t" x="684" y="485">Gateway / Proxy</text><text class="sp" x="684" y="519">Filtra y decide peticiones</text>
+  <rect class="pip" x="954" y="417" width="320" height="144" rx="14"/>
+  <text class="t" x="1114" y="478">Log</text><text class="sp" x="1114" y="521">Registra respuestas</text>
+  <path class="ln" d="M898 489 H948" marker-end="url(#a)"/>
+
+  <!-- Enrutador -->
+  <path class="ln" d="M684 549 V627" marker-end="url(#a)"/>
+  <rect class="note" x="74" y="609" width="340" height="236" rx="14"/>
+  <text class="h" x="98" y="654">Qué hace</text>
+  <text class="n" x="98" y="694">• Clasifica: FAQ, social,</text>
+  <text class="n" x="120" y="724">petición o fuera de FAQ</text>
+  <text class="n" x="98" y="760">• Evalúa complejidad</text>
+  <text class="n" x="98" y="796">• Elige: SLM o LLM,</text>
+  <text class="n" x="120" y="826">handoff o denegar</text>
+  <path class="dl" d="M418 689 H450"/>
+  <rect class="pip" x="454" y="633" width="460" height="112" rx="56"/>
+  <text class="t" x="684" y="685">Enrutador</text><text class="sp" x="684" y="719">Clasifica y elige acción y modelo</text>
+
+  <!-- Modelo + RAG -->
+  <rect class="pip" x="1034" y="657" width="240" height="120" rx="14"/>
+  <text class="t" x="1154" y="698">Modelo</text><text class="sp" x="1154" y="730">SLM o LLM</text><text class="sp" x="1154" y="760">Social: sin RAG</text>
+  <path class="ln" d="M918 717 H1028" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text class="l" x="974" y="664" text-anchor="middle">Si puede</text>
+  <text class="l" x="974" y="694" text-anchor="middle">resolver</text>
+  <path class="ln" d="M1154 653 V589 H854 V555" marker-end="url(#a)"/>
+  <text class="l" x="1004" y="618" text-anchor="middle">Gateway de salida</text>
+
+  <path class="ln" d="M1154 781 V849" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text class="l" x="1166" y="822">Si es FAQ</text>
+  <rect class="grn" x="1034" y="853" width="240" height="150" rx="14"/>
+  <text class="tg" x="1154" y="898">RAG</text>
+  <text class="sg" x="1154" y="938">BM25 + embeddings</text>
+  <text class="sg" x="1154" y="974">Vacío → Bárbara</text>
+
+  <!-- Bárbara -->
+  <path class="ln" d="M594 751 L398 905" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text class="l" x="506" y="860">Si no puede resolver</text>
+  <rect class="grn" x="74" y="913" width="420" height="112" rx="14"/>
+  <text class="tg" x="284" y="965">Consulta a Bárbara</text><text class="sg" x="284" y="999">Proactiva, canal por definir</text>
+  <path class="ln" d="M284 1029 V1127" marker-start="url(#a)" marker-end="url(#a)"/>
+  <rect class="grn" x="114" y="1133" width="320" height="88" rx="14"/>
+  <text class="tg" x="274" y="1187">Bárbara</text>
+  <path class="ln" d="M438 1177 H588" marker-end="url(#a)"/>
+  <rect class="grn" x="594" y="1113" width="680" height="132" rx="14"/>
+  <text class="tg" x="934" y="1170">¿Añadir al RAG principal?</text><text class="sg" x="934" y="1209">Decide si merece la pena</text>
+  <path class="ln" d="M734 1249 V1325" marker-end="url(#a)"/><text class="l" x="750" y="1296">No</text>
+  <path class="ln" d="M1104 1249 V1325" marker-end="url(#a)"/><text class="l" x="1120" y="1296">Sí</text>
+  <rect class="pip" x="574" y="1333" width="320" height="112" rx="14"/>
+  <text class="t" x="734" y="1385">Envía respuesta</text><text class="sp" x="734" y="1419">Bárbara → Gateway</text>
+  <rect class="grn" x="934" y="1333" width="340" height="112" rx="14"/>
+  <text class="tg" x="1104" y="1385">Añade conocimiento</text><text class="sg" x="1104" y="1419">Entra en el RAG</text>
+  <path class="ln" d="M1278 1389 H1318 V928 H1280" marker-end="url(#a)"/>
+  <path class="ln" d="M570 1389 H34 V581 H518 V555" marker-end="url(#a)"/>
+
+  <!-- Leyenda -->
+  <rect class="ext" x="74" y="1501" width="24" height="24" rx="5"/><text class="n" x="110" y="1521">Externo</text>
+  <rect class="pip" x="294" y="1501" width="24" height="24" rx="5"/><text class="n" x="330" y="1521">Pipeline</text>
+  <rect class="grn" x="514" y="1501" width="24" height="24" rx="5"/><text class="n" x="550" y="1521">Bárbara y RAG</text>
+</svg>
