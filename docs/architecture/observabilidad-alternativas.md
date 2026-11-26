@@ -350,6 +350,9 @@ Consecuencias:
 - **Hay que revisarlo si cambia quién accede a los logs** (más personas, acceso externo),
   junto con la decisión de RGPD (`database.md`, decisión abierta 2).
 
+> **Mejora prevista (después del MVP):** filtrar `error_message` y `traceback` y guardar el
+> original solo en logs raw de 72 h. Ver `docs/mejoras/filtrado-pii.md`.
+
 #### 2.8.7 Versión del código y formato de los errores
 
 **Versión en cada línea.** Se calcula una vez en `setup_logging()` y el mismo
