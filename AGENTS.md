@@ -15,6 +15,7 @@ necesite intervención humana se deriva a Bárbara (equipo de Apúntalo).
 - Solo `modules/channels/<canal>/` puede contener código específico de un canal (p. ej. Instagram).
 - Diagramas en `docs/architecture/`.
 - Decisiones técnicas (qué se eligió y por qué), numeradas en `docs/decisions/`.
+- Mejoras previstas para después del MVP (problema y propuesta, sin implementar), en `docs/mejoras/`.
 
 ## Estructura
 - `data/faqs/` — base de conocimiento (FAQ oficiales). Nunca datos reales de clientes.
