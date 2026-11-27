@@ -6,7 +6,8 @@ que llegan a una cuenta secundaria de Instagram de Apúntalo. Cualquier mensaje 
 necesite intervención humana se deriva a Bárbara (equipo de Apúntalo).
 
 - Backend en **Python 3.11 o superior**, priorizando la librería estándar (ver `docs/decisions/0001-python.md`).
-  El resto del stack (framework web, gestor de dependencias) está pendiente: no asumas frameworks ni dependencias.
+  Dependencias con `uv` (`pyproject.toml`, `uv.lock`); las del benchmark, en el grupo `bench` (ver
+  `docs/decisions/0003-uv-y-ollama.md`). El framework web está pendiente: no lo asumas.
 - Regla de producto: el asistente de Instagram solo responde con información de las FAQ;
   si no la tiene, deriva a una persona (handoff). Nunca inventa respuestas.
 
@@ -14,6 +15,7 @@ necesite intervención humana se deriva a Bárbara (equipo de Apúntalo).
 - Núcleo independiente del canal + un adaptador por canal.
 - Solo `modules/channels/<canal>/` puede contener código específico de un canal (p. ej. Instagram).
 - Diagramas en `docs/architecture/`.
+- Resultados de experimentos en `docs/benchmarks/`: cada uno con su `informe.md` (ver su README).
 - Decisiones técnicas (qué se eligió y por qué), numeradas en `docs/decisions/`.
 
 ## Estructura
@@ -51,9 +53,12 @@ necesite intervención humana se deriva a Bárbara (equipo de Apúntalo).
 
 ## Comandos
 - Crear la base de datos: `python shared/db/init_db.py` (solo usa la librería estándar).
+- Instalar dependencias: `uv sync` (añade `--group bench` para los benchmarks).
+- SLM locales: Ollama (`ollama serve`, `ollama pull <modelo>`).
 - Tests: `python -m unittest` desde la raíz del repo (usa `unittest`, de la librería estándar).
 - Instalar instagram-cli con nuestro parche: `modules/channels/instagram/install.sh`.
 - Evaluar la búsqueda del RAG: `python -m modules.rag.evaluate` (`--failures` para ver los fallos).
+- Criba de SLM del enrutador: `python -m modules.router.benchmark.criba_slm` (necesita `ollama serve`).
 - TODO: el resto (instalación, ejecución) está pendiente. No inventes esos comandos.
 
 ## Git y Pull Requests

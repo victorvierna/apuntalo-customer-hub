@@ -1,0 +1,11 @@
+[project]
+name = "apuntalo-marketing-platform"
+version = "0.1.0"
+description = "Respuestas automáticas a los mensajes de Instagram de Apúntalo, con derivación a una persona"
+requires-python = ">=3.11"
+# Producción: vacío a propósito. Toda dependencia se consulta antes (AGENTS.md).
+dependencies = []
+
+[dependency-groups]
+# Solo para los benchmarks del enrutador (no se instala en producción).
+bench = []
