@@ -15,6 +15,7 @@ necesite intervención humana se deriva a Bárbara (equipo de Apúntalo).
 - Núcleo independiente del canal + un adaptador por canal.
 - Solo `modules/channels/<canal>/` puede contener código específico de un canal (p. ej. Instagram).
 - Diagramas en `docs/architecture/`.
+- Resultados de experimentos en `docs/benchmarks/`: cada uno con su `informe.md` (ver su README).
 - Decisiones técnicas (qué se eligió y por qué), numeradas en `docs/decisions/`.
 
 ## Estructura
@@ -57,6 +58,7 @@ necesite intervención humana se deriva a Bárbara (equipo de Apúntalo).
 - Tests: `python -m unittest` desde la raíz del repo (usa `unittest`, de la librería estándar).
 - Instalar instagram-cli con nuestro parche: `modules/channels/instagram/install.sh`.
 - Evaluar la búsqueda del RAG: `python -m modules.rag.evaluate` (`--failures` para ver los fallos).
+- Criba de SLM del enrutador: `python -m modules.router.benchmark.criba_slm` (necesita `ollama serve`).
 - TODO: el resto (instalación, ejecución) está pendiente. No inventes esos comandos.
 
 ## Git y Pull Requests
