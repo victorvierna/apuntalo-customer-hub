@@ -1,0 +1,13 @@
+version = 1
+revision = 5
+requires-python = ">=3.11"
+
+[[package]]
+name = "apuntalo-marketing-platform"
+version = "0.1.0"
+source = { virtual = "." }
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+bench = []

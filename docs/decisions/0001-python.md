@@ -36,5 +36,4 @@ antes de escribirlo.
 ## Pendiente
 
 - Framework web para el dashboard (`modules/platform/`).
-- Gestor de dependencias y entorno virtual (`venv` + `requirements.txt`, `uv`…), cuando
-  aparezca la primera dependencia.
+- ~~Gestor de dependencias~~: `uv`, ver `0003-uv-y-ollama.md`.
